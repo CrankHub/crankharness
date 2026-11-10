@@ -1,0 +1,40 @@
+name: Check
+
+# The check's own tests on every push and pull request, and the contract check against
+# CrankHub/crankmagic's main on demand and once a week (it is green once ROB-400's PR has
+# merged there; a red run says a project drifted from the contract).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 6 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm test
+
+  crankmagic:
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: CrankHub/crankmagic
+          path: project
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node check-contract.mjs project
