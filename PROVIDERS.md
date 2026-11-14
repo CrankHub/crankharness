@@ -43,8 +43,8 @@ Where a tool has hooks or a sandbox, they are used as well, as an earlier warnin
 
 A worker commits as it goes and keeps `.harness/progress/<ISSUE-ID>.md` on its branch up to date with every
 commit: what is done, what is next, what it tried. A worker stopped without warning has therefore already left its
-checkpoint. The next worker, on any provider, resumes from the branch. The merge agent drops `.harness/` when it
-lands the change.
+checkpoint. The next worker, on any provider, resumes from the branch. The worker that finishes the issue
+deletes the checkpoint in its last commit before handing back.
 
 ## Capabilities, and what is not yet known
 

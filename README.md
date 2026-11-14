@@ -17,7 +17,7 @@ This repository holds everything that is **not** project-specific. What a projec
 | [`dod/issue.md`](dod/issue.md) | the issue-level definition of done (14 lines; the merge agent marks Done) |
 | [`dod/project.md`](dod/project.md) | the project-level definition of done: the one human review, per Linear project |
 | [`risk.md`](risk.md) | the default risk list (what is high), what a flag does and never does, and how an agent proposes a change in `PROGRESS.md` |
-| [`COMPLETION.md`](COMPLETION.md) | what finished means: Rob's six requirements (Nov 14, 2026), the issue that delivers each, the stages, and the order |
+| [`COMPLETION.md`](COMPLETION.md) | what finished means: Rob's requirements of Nov 14, 2026, the issue that delivers each, the stages, and the order |
 | [`ORCHESTRATOR.md`](ORCHESTRATOR.md) | the one orchestrator per project: its loop, validating a task, carrying a change through, assigning work, the merge queue |
 | [`PROVIDERS.md`](PROVIDERS.md) | Claude, Codex and Grok through one adapter interface; model tiers; who evaluates whom; what is not yet known about each tool |
 | [`PROOF.md`](PROOF.md) | the autonomy proof: the unattended run that shows the loop closes (ROB-524) |

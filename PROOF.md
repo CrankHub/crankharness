@@ -39,7 +39,7 @@ contract that passes. The work is trivial on purpose. The proof is of the loop.
 | 12 | a merge that passes its branch gate and breaks main | reverted, returned to its worker; main is never red at the end of a poll | tested |
 | 13 | a main gate that fails once and passes on re-run | not reverted | no false reverts |
 | 14 | a commit pushed to a branch after its PASS | the PASS is void and the commit is re-evaluated | the verdict is bound to a commit |
-| 15 | the orchestrator killed between landing a merge and writing the main-gate status | the successor runs the gate on that commit and finishes; exactly one merge | crash recovery |
+| 15 | the orchestrator killed between landing a merge and writing the main-gate status | the supervisor restarts it; the successor runs the gate on that commit and finishes; exactly one merge | crash recovery |
 | 16 | the orchestrator paused past its lease expiry, a second one started, the first resumed | the first writes nothing; one lease, one epoch in every write after take-over | one orchestrator |
 | 17 | a second orchestrator started while the first is healthy | it exits naming the holder | one orchestrator |
 | 18 | nothing | every eligible issue (validated, no Touches overlap, room under the limit) is dispatched within one poll of its last blocker merging | auto pick-up |
@@ -48,7 +48,8 @@ contract that passes. The work is trivial on purpose. The proof is of the loop.
 
 ## The live run: what must be observed
 
-Items 1, 2, 6, 18 and 20, with real providers, plus: each provider wrote at least one merged change and judged at
+Items 1, 2, 3, 6, 8, 14, 18 and 20, with real providers (for item 8 a worker is stopped by the harness mid-issue
+and a worker of another provider resumes from the checkpoint), plus: each provider wrote at least one merged change and judged at
 least one; every worker, of every provider, was held to its Touches, its wall-time cap and the secret scan.
 
 ## Pass and fail

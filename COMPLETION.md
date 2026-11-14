@@ -51,8 +51,8 @@ list of harness issues.
 | Stage | What exists | A project at this stage | Issues, in order |
 | --- | --- | --- | --- |
 | **0. By hand** | the contract and its check | person-started sessions follow the project's `AGENTS.md`; a person-started orchestrator session merges (`ORCHESTRATOR.md`, "By hand") | ROB-400 (done in substance), ROB-402 |
-| **1. Dispatched** | one command turns an issue into a gated, judged draft pull request on any provider | the orchestrator session runs dispatch per issue; it still merges | ROB-403; ROB-516's interface, then ROB-404 against it; ROB-405; ROB-406; the rest of ROB-516; ROB-518; ROB-522; ROB-523; then ROB-407 (ten measured dispatches) |
-| **2. Unattended** | the supervised orchestrator process | nothing is started by hand | ROB-397, ROB-398, ROB-399; ROB-410 (run folders); ROB-408; ROB-411; ROB-412; ROB-521; ROB-517; ROB-519; ROB-520; ROB-413; ROB-414; ROB-417 |
+| **1. Dispatched** | one command turns an issue into a gated, judged draft pull request on any provider | the orchestrator session runs dispatch per issue; it still merges | ROB-403; ROB-516's interface, then ROB-404 against it; ROB-405; ROB-406; the rest of ROB-516; ROB-399 (the GitHub App, which alone writes verdicts); ROB-518; ROB-522; ROB-523; then ROB-407 (ten measured dispatches) |
+| **2. Unattended** | the supervised orchestrator process | nothing is started by hand | ROB-397, ROB-398; ROB-410 (run folders); ROB-408; ROB-411; ROB-412; ROB-521; ROB-517; ROB-519; ROB-520; ROB-413; ROB-414; ROB-417 |
 | **3. Proven: finished** | both proof runs pass | concurrency above three while the PASS and revert rates hold | ROB-524, then ROB-420 |
 | **4. Around it** | evidence bundle, release step, the first project review, a second tracker | the one human review per project | ROB-416, ROB-415, ROB-418, ROB-419 |
 
@@ -72,6 +72,20 @@ further.
 4. **Where the orchestrator runs:** an always-on machine holding the three logins, with a supervisor.
 5. **CI.** A project whose repository has no workflow cannot prove "the same checks pass in PR CI". It reports that
    line as not yet provable until it has one.
+6. **Fencing on GitHub's merge queue.** The lease's fast-forward guarantee holds only where the orchestrator lands
+   changes itself. On the queue path, confirm that adding an already-merged or already-queued pull request is a
+   no-op, and plant a stale holder on that path in the proof.
+7. **Who may write `refs/harness/*`.** A ruleset must keep it to the harness's App.
+8. **Polling by person-started sessions.** At stage 0 a session must re-check the tracker on a timer. Nothing has
+   shown that every provider's tool can.
+
+## Known stale, to be swept under ROB-522 and ROB-523
+
+`templates/AGENTS.sections.md` still tells a worker to write its checkpoint to `PROGRESS.md` at a usage limit; the
+checkpoint is now `.harness/progress/<ISSUE-ID>.md`, kept current with every commit (`PROVIDERS.md`).
+`templates/issue.md` still lists `agent-ready` as a label an author sets and lacks the Serves, Produces and Consumes
+lines. `risk.md` still puts risk-list proposals in `PROGRESS.md`; they belong in the hand-back file. `dod/issue.md`
+speaks of phases 0 to 3: phase 0 is stage 0, phase 1 is stage 1, phases 2 and 3 are stage 2.
 
 ## The order of merging
 

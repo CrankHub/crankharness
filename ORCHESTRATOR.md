@@ -37,10 +37,14 @@ last decision processed; what is queued; the five measures (`COMPLETION.md`).
 - **A second orchestrator** reads an unexpired lease it does not hold, and exits naming the holder.
 - **Take-over:** after expiry, any orchestrator may take it with a compare-and-swap and a higher epoch.
 - **Fencing.** A holder that stalled and wakes after a take-over must not finish what it started. Three things
-  stop it: it re-reads the lease immediately before every write and stops if the epoch is not its own; main only
-  ever advances by a fast-forward push of a commit whose parent is the current main, so a push prepared against an
-  older main is refused by git; and every status and ledger write carries the writer's epoch, and a successor
-  ignores and overwrites anything with a lower one.
+  stop it. It re-reads the lease immediately before every write and stops if the epoch is not its own. Where the
+  orchestrator lands changes itself, main only advances by a fast-forward push of a commit whose parent is the
+  current main, so a push prepared against an older main is refused by git; where GitHub's merge queue lands them,
+  the queue is the serializer and adding a pull request that is already merged or queued does nothing. Every commit
+  status, and every ledger comment in the tracker, carries the writer's epoch, and a successor ignores and
+  overwrites anything with a lower one; a tracker state change has no epoch, so a successor's reconcile step
+  re-derives each issue's state from its pull request and statuses rather than trusting it. A ruleset keeps
+  `refs/harness/*` writable only by the harness's App, never by a worker's credentials.
 - **Staying up.** The process runs under a supervisor (a system service or scheduled task on an always-on machine
   that holds the subscription logins) which restarts it when it exits. A restart is just a take-over.
 
@@ -60,9 +64,11 @@ Every poll, in this order. Before each step that writes, re-read the lease.
    status itself; no worker or evaluator can write it. NEEDS_WORK: add one to the issue's rounds; if rounds exceed
    `caps.rounds` (3), mark it Blocked and put it in the for-rob file; otherwise return it to its worker.
 4. **Merge, one at a time.** Take the oldest PASS in merge order (`COMPLETION.md`):
-   a. If the branch is behind main, merge main into it. If that merge has conflicts, return the issue to its
-      worker; the orchestrator resolves nothing. If it is clean, the PASS still stands, and the gate is run on the
-      merged commit. Any other new commit on the branch voids the PASS and the issue goes back to step 3.
+   a. If the branch is behind main, the merge agent merges main into it. If that merge has conflicts, return the
+      issue to its worker; the orchestrator resolves nothing. If it is clean (a merge commit whose two parents are
+      the judged commit and main, with no conflicted file), the PASS carries over: the gate is run on the merged
+      commit and the harness writes the evaluation status on it, naming the commit that was judged. Any other new
+      commit on the branch voids the PASS and the issue goes back to step 3.
    b. Check the diff against the issue's Touches. Land it through the project's merge queue, or, where the
       repository has none, by a fast-forward push to main by the App under a ruleset that lets nothing else push.
    c. Run the gate on the new main and write `harness/main-gate`. If it fails, run it once more; if it fails again,
@@ -79,7 +85,10 @@ Every poll, in this order. Before each step that writes, re-read the lease.
 8. **Change.** Process any decision newer than the last one in the project ledger ("When things change").
 9. **Goal.** When the last issue of a milestone is Done, run that milestone's check command on main, attach the
    evidence, and file each failure as an issue for the owner of the failing file.
-10. **Books.** The project ledger, the for-rob file, the run folders.
+10. **Books.** The project ledger, the for-rob file, the run folders. Records that live in the repository (the
+    compiled for-rob file, a decision file the orchestrator writes) land by a records-only change the orchestrator
+    makes itself; it is the one kind of change that needs no verdict, because it touches no rule and no product
+    file. Anything else the orchestrator changes goes through evaluation like a worker's change.
 
 ## Validating a task (ROB-520)
 
@@ -101,7 +110,7 @@ session with no write tools, on a different provider from the one that wrote the
 - **The stamp** goes on the ledger: `validated at main <commit>, decisions through <decision id>: VALID`.
 - **Re-validation** happens only when a file or seam the issue names has changed on main since that commit, or a
   decision newer than that id exists. Otherwise the stamp stands.
-- **A validator that says VALID to everything** is caught by the proof (`PROOF.md`, items 6 and 11) and, in real
+- **A validator that says VALID to everything** is caught by the proof (`PROOF.md`, items 10 and 11) and, in real
   use, by the stale rate: an issue that fails at its worker for a reason validation should have caught counts
   against the validator.
 
@@ -145,6 +154,7 @@ thing and each stated on the project ledger:
 
 - **The lease** is a line in the project ledger (holder, started, last check). A session started as orchestrator
   reads it first and stops if another holder checked within the last three polls. This is advisory, not atomic.
+- **A worker merges main into its own branch** when asked; the session does not push to a worker's branch.
 - **Workers claim their own slot** by moving a ready issue to In Progress, because the session cannot start
   sessions on other providers. Two tools can race; the orchestrator returns the newer claim to Todo.
 - **The verdict** is a comment naming the head commit, by an evaluator session; the orchestrator checks the commit
