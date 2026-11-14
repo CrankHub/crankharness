@@ -16,6 +16,7 @@ This repository holds everything that is **not** project-specific. What a projec
 | [`templates/WORKFLOW.md`](templates/WORKFLOW.md) | the runtime policy file the daemon reads, to copy and fill in |
 | [`dod/issue.md`](dod/issue.md) | the issue-level definition of done (14 lines; the merge agent marks Done) |
 | [`dod/project.md`](dod/project.md) | the project-level definition of done: the one human review, per Linear project |
+| [`hooks/`](hooks/README.md) | the fence around a headless worker: deny rules per phase in `hooks/rules.json`, a Stop hook that runs the gate, and `node hooks/install.mjs --worktree <path> --phase <phase> [--touches <globs>]` (ROB-405) |
 | [`risk.md`](risk.md) | the default risk list (what is high), what a flag does and never does, and how an agent proposes a change in `PROGRESS.md` |
 
 The design is Rob's harness plan of Nov 2, 2026 and its decisions; the build is Linear project **P-ROB-17
