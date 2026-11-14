@@ -157,8 +157,12 @@ thing and each stated on the project ledger:
 - **A worker merges main into its own branch** when asked; the session does not push to a worker's branch.
 - **Workers claim their own slot** by moving a ready issue to In Progress, because the session cannot start
   sessions on other providers. Two tools can race; the orchestrator returns the newer claim to Todo.
-- **The verdict** is a comment naming the head commit, by an evaluator session; the orchestrator checks the commit
-  and the author before trusting it. It is not authenticated.
+- **The verdict** at stage 0 is a comment naming the head commit, by an evaluator session; the orchestrator checks
+  the commit and the author before trusting it. It is not authenticated. From stage 1 the harness's App writes it
+  as a commit status (ROB-399, ROB-518), as described above.
+- **A question for the owner** reaches a person, not just a file: the orchestrator also raises it as a tracker
+  issue labeled for the owner and assigned to him, which the tracker pushes to his phone. It never waits on the
+  answer. This holds at every stage.
 - **The main-gate result** is a line in the issue ledger.
 - **Staying up** is the session re-checking on a timer, and a person re-pasting its prompt.
 

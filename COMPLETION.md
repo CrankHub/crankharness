@@ -77,7 +77,11 @@ further.
    changes itself. On the queue path, confirm that adding an already-merged or already-queued pull request is a
    no-op, and plant a stale holder on that path in the proof.
 7. **Who may write `refs/harness/*`.** A ruleset must keep it to the harness's App.
-8. **Polling by person-started sessions.** At stage 0 a session must re-check the tracker on a timer. Nothing has
+8. **Reaching the owner.** A spend or a lapsed sign-in needs a person. The path is a tracker issue labeled for the
+   owner and assigned to him (the tracker's own mobile notification), plus the for-rob file. Nothing waits on it.
+9. **Telling a worker from the owner.** Workers act on the owner's logins. The proof needs each provider's worker
+   to carry its own identity (ROB-516).
+10. **Polling by person-started sessions.** At stage 0 a session must re-check the tracker on a timer. Nothing has
    shown that every provider's tool can.
 
 ## Known stale, to be swept under ROB-522 and ROB-523
