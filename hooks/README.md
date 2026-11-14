@@ -77,3 +77,12 @@ It builds a throwaway repository and worktree, installs the hooks, and runs a re
 worker (`claude -p`, `bypassPermissions`) that tries each refused action, then a second worker
 whose gate fails until it fixes its file. It needs the `claude` subscription login; without it,
 `--offline` checks only the installed commands. The record is `live-proof.json` in the folder.
+
+Last run: Nov 14, 2026, Claude Code 2.1.282, subscription login. All 8 refusals held in
+`bypassPermissions` and nothing refused reached disk. The allowed write went through. The gate
+worker was stopped once, fixed its file, then finished, and the Stop hook committed its file. A plain
+`git worktree add` worktree loads its own `.claude/settings.local.json`; no `--settings` flag is
+needed.
+
+The OS temp folder is writable on purpose (scratch space for the evaluator), so the dispatch must
+not put worktrees inside it.

@@ -234,6 +234,15 @@ describe('outside-touches: the Touches are the lease', () => {
     allowed(bash('cd src/app && echo x > z.js'));
     allowed(write(join(root, 'src', 'other.js')), { touches: null });
   });
+  // Found by the live proof: a worker ran `mkdir -p src && printf ... > src/greet.js`.
+  test('mkdir: a folder is not a file; the files written into it are still checked', () => {
+    allowed(bash('mkdir -p src && printf "x" > src/app/greet.js'));
+    allowed(bash('mkdir -p docs/new'));
+    refused(bash('mkdir -p src && echo x > src/other.js'), 'outside-touches');
+    refused(bash(`mkdir -p ${OUTSIDE}`), 'outside-worktree');
+    refused(bash('mkdir -p .git/hooks'), 'harness-files');
+    refused(bash('mkdir out'), 'read-only-phase', { phase: 'evaluate' });
+  });
 });
 
 describe('cap-wall-time: past the cap, only the wrap-up', () => {

@@ -517,7 +517,8 @@ export function checkWrite(rules, config, raw, cwd, { tool = 'write' } = {}) {
     const s = rules.scope.read_only_phase;
     return deny(s.id, `${s.why}: phase ${phase}`, rel);
   }
-  if (mode === 'touches' && Array.isArray(config.touches)) {
+  // An empty folder changes nothing; every file later written into it is checked on its own.
+  if (mode === 'touches' && Array.isArray(config.touches) && tool !== 'mkdir') {
     const s = rules.scope.outside_touches;
     if (anyGlob(config.touches, rel, abs)) return null;
     if (anyGlob(s.always_writable, rel, abs)) return null;
@@ -593,8 +594,10 @@ export function decide(input, config, rules, { now = Date.now() } = {}) {
         const d = checkSecrets(rules, config, normPath(m, segCwd), phase);
         if (d) return d;
       }
+      const w = stripWrappers(seg.words);
+      const isMkdir = w.length > 0 && programName(w[0]) === 'mkdir';
       for (const t of writeTargets(seg)) {
-        const d = checkWrite(rules, config, t, segCwd, { tool: 'create' });
+        const d = checkWrite(rules, config, t, segCwd, { tool: isMkdir ? 'mkdir' : 'create' });
         if (d) return d;
       }
     }
