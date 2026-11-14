@@ -1,46 +1,71 @@
 # The autonomy proof
 
-ROB-524. The harness is finished when this passes, unattended. It is a run, not a review: a fixture project is
-handed to the orchestrator, nobody touches it, and the evidence either shows all ten things below or the proof fails
-and names what was missing.
+ROB-524. The harness is finished when both runs below pass. Each is a run, not a review: a fixture project is
+handed to the orchestrator, nobody touches it, and the evidence either shows every item or the proof fails and
+names what was missing.
+
+## Two runs, and what each can show
+
+| Run | Providers | Shows | Cannot show |
+| --- | --- | --- | --- |
+| **The fault run** | scripted fake providers, behind the real adapter interface | that the loop closes and survives every planted fault, the same way every time | anything about a real provider |
+| **The live run** | every real provider the owner uses, on subscription logins | that Claude Code, Codex and Grok each do the job through the adapter, and judge each other | faults that cannot be forced on a real tool |
+
+The live run needs all three providers. If a provider's tool cannot do the job (`PROVIDERS.md`), the live run
+passes only with the owner's recorded decision that the requirement is reduced, naming the provider and the missing
+capability. It is never quietly dropped.
 
 ## The fixture
 
-A small repository and a tracker project made for the proof: twelve issues in a dependency graph, two lanes of
-files, one seam between the lanes, one milestone with an integration check, a goal file with three checks, and a
-contract that passes. The issues are trivial on purpose. The proof is of the loop, not of the work.
+A small repository and tracker project made for the proof: twelve issues in a dependency graph, two lanes of files,
+one true interface between the lanes, one milestone with a check command, a goal file with three checks, and a
+contract that passes. The work is trivial on purpose. The proof is of the loop.
 
-Faults are planted so the run meets them: one issue whose first attempt fails a criterion, one pair with overlapping
-Touches, one merge that passes its branch gate and breaks main, a provider scripted to report its usage limit, a
-decision file that appears mid-run, and a kill of the orchestrator at a fixed point.
+## The fault run: what is planted and what must be observed
 
-## What must be observed
+| # | Planted | Must be observed | Proves |
+| --- | --- | --- | --- |
+| 1 | two fake providers | work written by each is judged by the other; no verdict is written by a worker | collaborative |
+| 2 | an issue whose first attempt fails a criterion | NEEDS_WORK, fixed by its worker, PASS on round two | QA'd |
+| 3 | a change that passes the gate but fails an acceptance criterion | NEEDS_WORK; a run where it merges fails the proof | the evaluator is not a rubber stamp |
+| 4 | a change that meets its criteria and works against a named goal check | NEEDS_WORK naming the check | goal-oriented |
+| 5 | a worker that never satisfies the evaluator | Blocked after `caps.rounds`, in the for-rob file, and the rest of the run carries on | no livelock |
+| 6 | an interface-first producer and its consumer | the consumer is opened after the interface merges and before the producer is Done | collaborative |
+| 7 | two issues with overlapping Touches | never In Progress together | mergeable |
+| 8 | a provider at its usage limit mid-issue | another provider resumes from the checkpoint and finishes | autonomous |
+| 9 | a provider that is signed out | routed around; reported in the for-rob file; nothing waits | autonomous |
+| 10 | a decision file added mid-run | one issue corrected (STALE), one canceled (OBSOLETE, its worker stopped), one **new issue written, validated by a separate session, built and merged** | things change; new assignments |
+| 11 | an issue naming a file that no longer exists | caught at validation, corrected before any worker starts | validation is real |
+| 12 | a merge that passes its branch gate and breaks main | reverted, returned to its worker; main is never red at the end of a poll | tested |
+| 13 | a main gate that fails once and passes on re-run | not reverted | no false reverts |
+| 14 | a commit pushed to a branch after its PASS | the PASS is void and the commit is re-evaluated | the verdict is bound to a commit |
+| 15 | the orchestrator killed between landing a merge and writing the main-gate status | the successor runs the gate on that commit and finishes; exactly one merge | crash recovery |
+| 16 | the orchestrator paused past its lease expiry, a second one started, the first resumed | the first writes nothing; one lease, one epoch in every write after take-over | one orchestrator |
+| 17 | a second orchestrator started while the first is healthy | it exits naming the holder | one orchestrator |
+| 18 | nothing | every eligible issue (validated, no Touches overlap, room under the limit) is dispatched within one poll of its last blocker merging | auto pick-up |
+| 19 | a milestone whose check command fails | the command is run on main, the evidence attached, and one issue filed per failure | goal-oriented |
+| 20 | nothing | at the end, every issue is Done, Blocked or Canceled, each with its ledger | closure |
 
-| # | Observed in the evidence | Requirement it proves |
-| --- | --- | --- |
-| 1 | Work written by at least two providers, each evaluated by the other | collaborative across platforms |
-| 2 | A NEEDS_WORK verdict, fixed by its worker, passed on the second round | QA'd |
-| 3 | An interface pull request merged before its consumer was opened | collaborative; mergeable |
-| 4 | Two issues with overlapping Touches never In Progress together | mergeable |
-| 5 | A provider at its usage limit mid-issue; another provider finishes it | autonomous; collaborative |
-| 6 | A decision recorded mid-run makes one issue STALE and one OBSOLETE; both handled | goal-oriented; things change |
-| 7 | A merge that breaks main is reverted and the issue returned | tested |
-| 8 | The orchestrator is killed; a successor takes the lease; no merge lost or repeated | one orchestrator |
-| 9 | Every next issue dispatched within one poll of its blocker merging | auto pick-up |
-| 10 | The milestone check run on main, its evidence attached | goal-oriented |
+## The live run: what must be observed
 
-## The report
+Items 1, 2, 6, 18 and 20, with real providers, plus: each provider wrote at least one merged change and judged at
+least one; every worker, of every provider, was held to its Touches, its wall-time cap and the secret scan.
 
-Per issue: who wrote it, on which model, who judged it, how many rounds, how long. For the run: first-pass PASS
-rate, reverts, time from a merge to the next dispatch, and a list of every moment a person would have been needed.
-The target for that list is empty.
+## Pass and fail
+
+- Each run has a time limit set in the fixture. Running past it is a failure.
+- "Nobody touched it" is checked from the actors on every commit, status, tracker change and comment: all must be
+  the harness's App or a provider's worker identity. A self-reported list is not evidence.
+- The report gives, per issue: author provider and model, evaluator provider and model, rounds, time; and for the
+  run: first-pass PASS rate, reverts, time from a merge to the next dispatch, stale rate.
+- Any item not observed fails the proof and is named.
 
 ## What the proof does not show
 
-That the work is good on a real project. That is what a real project's goal file, milestones and one human review
-are for (ROB-420, ROB-418). The proof shows only that the loop closes by itself.
+That the work is good on a real project. That is what a real project's goal file, its milestone checks and the one
+human review are for (ROB-420, ROB-418).
 
 ## Before the proof exists
 
-A project at stage 0 or 1 can run a hand version: the same ten observations, collected by the orchestrator session
-over the project's first two waves and written on its standing issue. It is weaker evidence, and it says so.
+A project at stage 0 or 1 keeps a hand version: the orchestrator session notes on its ledger each item it sees
+happen in real work. It is weaker evidence, and the ledger says so.
