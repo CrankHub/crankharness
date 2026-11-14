@@ -53,8 +53,8 @@ deletes the checkpoint in its last commit before handing back.
 | Runs headless from a command | stage 1 and up | yes | to be verified | **unknown** |
 | Takes a model name | tiers | yes | to be verified | **unknown** |
 | Reads the project's `AGENTS.md` unprompted | every job | through `CLAUDE.md` | yes | **unknown** |
-| Reaches the tracker, read and write | stage 0 hand-back | through a connector | to be verified | **unknown** |
-| Reaches GitHub: push, pull requests | every job | yes | to be verified | **unknown** |
+| Reaches the tracker, read and write | stage 0 hand-back | through a connector | yes (Rob, Nov 14, 2026: it has created items there) | yes (Rob, Nov 14, 2026) |
+| Reaches GitHub: push, pull requests | every job | yes | yes (Rob, Nov 14, 2026: it has created items there) | yes (Rob, Nov 14, 2026) |
 | Starts a fresh session per job | evaluation | yes | to be verified | **unknown** |
 | Runs the project's gate | workers at stage 0 | yes | to be verified | **unknown** |
 | Reports its usage | routing | partly | to be verified | **unknown** |

@@ -66,7 +66,8 @@ further.
 1. **The merge queue.** GitHub's merge queue is not available on every plan for a private repository. ROB-398
    checks it for each project. Where there is none, "the queue" is the orchestrator's own serial merge by
    fast-forward push under a ruleset that lets only the App push. `ORCHESTRATOR.md` is written to work either way.
-2. **Each provider's tool** (`PROVIDERS.md`): headless, a model name, fresh sessions. Grok's is entirely unknown.
+2. **Each provider's tool** (`PROVIDERS.md`): headless, a model name, fresh sessions. Codex and Grok are shown to
+   reach the tracker and GitHub (Rob, Nov 14, 2026); the rest is unshown for both.
 3. **Subscription logins lapse** and need a person to renew. This is a known, permanent human touchpoint. The
    harness routes around a signed-out provider and reports it; with all providers signed out, it stops and says so.
 4. **Where the orchestrator runs:** an always-on machine holding the three logins, with a supervisor.
