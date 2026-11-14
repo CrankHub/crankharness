@@ -7,7 +7,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, copyFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, copyFileSync, rmSync, chmodSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
@@ -130,7 +130,11 @@ function scratch({ hooks = false, evaluator = false, contract = true } = {}) {
     writeFileSync(join(repo, 'tools', 'gate.sh'), '#!/usr/bin/env bash\nif grep -q ok result.txt 2>/dev/null; then echo "  ok    result"; exit 0; fi\necho "  FAIL  result.txt does not say ok"; exit 1\n');
   }
   git(repo, 'add', '-A');
-  if (contract) git(repo, 'add', '--chmod=+x', 'tools/gate.sh');
+  if (contract) {
+    // Executable on disk and in the index, so the checkout is clean where file modes count (Linux).
+    chmodSync(join(repo, 'tools', 'gate.sh'), 0o755);
+    git(repo, 'add', '--chmod=+x', 'tools/gate.sh');
+  }
   git(repo, 'commit', '-q', '-m', 'start');
   git(repo, 'remote', 'add', 'origin', origin);
   git(repo, 'push', '-q', '-u', 'origin', 'main');
