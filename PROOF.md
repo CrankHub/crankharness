@@ -56,7 +56,10 @@ least one; every worker, of every provider, was held to its Touches, its wall-ti
 
 - Each run has a time limit set in the fixture. Running past it is a failure.
 - "Nobody touched it" is checked from the actors on every commit, status, tracker change and comment: all must be
-  the harness's App or a provider's worker identity. A self-reported list is not evidence.
+  the harness's App or a provider's worker identity. Workers run on the owner's subscription logins, so by default
+  they would act as the owner and be indistinguishable from him; the adapter (ROB-516) therefore gives each
+  provider's worker its own git author and a machine identity for its tracker and GitHub writes. A self-reported
+  list is not evidence.
 - The report gives, per issue: author provider and model, evaluator provider and model, rounds, time; and for the
   run: first-pass PASS rate, reverts, time from a merge to the next dispatch, stale rate.
 - Any item not observed fails the proof and is named.
