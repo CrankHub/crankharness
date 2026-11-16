@@ -17,12 +17,19 @@ This repository holds everything that is **not** project-specific. What a projec
 | [`dod/issue.md`](dod/issue.md) | the issue-level definition of done (14 lines; the merge agent marks Done) |
 | [`dod/project.md`](dod/project.md) | the project-level definition of done: the one human review, per Linear project |
 | [`dispatch/dispatch.mjs`](dispatch/dispatch.mjs) | one issue to one draft PR: `node dispatch/dispatch.mjs --repo <checkout> --issue <KEY> --issue-file <issue.md> [--provider claude\|codex\|grok] [--dry-run]` runs the contract check, makes the worktree and branch, installs the hooks, runs the headless worker, the local gate and the evaluator, pushes, opens a draft PR and writes `<repo>/.harness/runs/<KEY>/dispatch.json` (ROB-404) |
+| [`evaluator/`](evaluator/README.md) | the fresh-context evaluator (ROB-406): `node evaluator/evaluate.mjs --repo <path> --issue <KEY> --branch <name>` judges a branch against its issue with a read-only worker and writes PASS or NEEDS_WORK to `.harness/runs/<KEY>/evaluation.json` |
+| [`hooks/`](hooks/README.md) | the fence around a headless worker: deny rules per phase in `hooks/rules.json`, a Stop hook that runs the gate, and `node hooks/install.mjs --worktree <path> --phase <phase> [--touches <globs>]` (ROB-405) |
 | [`risk.md`](risk.md) | the default risk list (what is high), what a flag does and never does, and how an agent proposes a change in `PROGRESS.md` |
+| [`COMPLETION.md`](COMPLETION.md) | what finished means: Rob's requirements of Nov 14, 2026, the issue that delivers each, the stages, and the order |
+| [`ORCHESTRATOR.md`](ORCHESTRATOR.md) | the one orchestrator per project: its loop, validating a task, carrying a change through, assigning work, the merge queue |
+| [`PROVIDERS.md`](PROVIDERS.md) | Claude, Codex and Grok through one adapter interface; model tiers; who evaluates whom; what is not yet known about each tool |
+| [`PROOF.md`](PROOF.md) | the autonomy proof: the unattended run that shows the loop closes (ROB-524) |
 
 The design is Rob's harness plan of Nov 2, 2026 and its decisions; the build is Linear project **P-ROB-17
 "CrankHarness: the delivery harness"**, Phase 0 to 4. This repository is ROB-400. The dispatch script (ROB-404), the
 hooks (ROB-405), the evaluator (ROB-406), the daemon (ROB-408) and the merge agent (ROB-412) land here as they are
-built.
+built. The parts added on Nov 14, 2026 so that three providers work through one orchestrator are ROB-516 to
+ROB-524; `COMPLETION.md` gives the order.
 
 ## Running the check
 
