@@ -86,3 +86,24 @@ The hooks (ROB-405), the evaluator (ROB-406), the run folders (ROB-410) and the 
 harness's and come with it; a project does not provide them. `for-rob/` and `FOR_ROB_TO_CONFIRM.md` (ROB-402) are
 created by the first finished issue, so their absence is not a contract failure. Rulesets and the GitHub App are
 owner-side setup (ROB-398, ROB-399), checked by the daemon at run time, not here.
+
+## Contract 2: proposed, not yet checked
+
+Rob's direction of Nov 14, 2026 (`COMPLETION.md`) adds a fifth part and several keys. They are read by people and
+by a hand orchestrator today; `check-contract` ignores them until the issue named beside each lands, and
+`contract:` stays `1` until then. A project may carry them now.
+
+| Key | Meaning | Becomes checked with |
+| --- | --- | --- |
+| `tracker.states.in_review` | the state a handed-back issue waits in for its verdict and merge | ROB-523 |
+| `caps.rounds` | NEEDS_WORK rounds before an issue is Blocked (3) | ROB-518 |
+| `ready.by` | who marks an issue ready: `human`, `orchestrator-session` or `harness` | ROB-519 |
+| `providers` | the order, who evaluates whom, each provider's share and tier-to-model map (`PROVIDERS.md`) | ROB-517 |
+| `shared_files` | files with one owner that no other issue may write | ROB-523 |
+| `goal.file` | **part 5:** the project's goal file, with numbered goal checks | ROB-522 |
+| `milestones` | a list of `{id, issues, check}`; `check` is one command run on main | ROB-522 |
+| `decisions` | the path where a change of plan is recorded, one new file per decision | ROB-520 |
+
+The issue template gains, with ROB-522 and ROB-523: a **Serves** line (the goal checks, or "enabling" and the issue
+enabled), **Produces** and **Consumes** lines (the seams), and the labels `provider:<name>` and `tier:A|B|C`.
+`agent-ready` stops being a label an author sets.
