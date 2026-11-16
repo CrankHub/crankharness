@@ -1,0 +1,153 @@
+{
+  "version": 1,
+  "about": "The PreToolUse deny rules and the Stop hook settings, per phase. Read by hooks/pretooluse.mjs and hooks/stop.mjs; installed by hooks/install.mjs. Globs: * is one path segment, ** any depth, a glob without a / matches the file name at any depth. Patterns are JavaScript regular expressions, tested against each simple command of a Bash call, written as the program's plain name and its words (git push --force origin x), with env, sudo, npx, timeout and the like taken off the front.",
+  "phases": {
+    "implement": {
+      "about": "The worker writes inside its worktree, inside the issue's Touches.",
+      "writes": "touches"
+    },
+    "evaluate": {
+      "about": "The fresh-context evaluator reads, runs the tests and reports; it changes no file.",
+      "writes": "none"
+    },
+    "merge": {
+      "about": "The merge agent resolves conflicts anywhere in the worktree and is the only profile that may merge a PR.",
+      "writes": "worktree"
+    }
+  },
+  "paths": [
+    {
+      "id": "secrets",
+      "why": "secrets and credentials are never read, written or named in a command by an agent (README: no secrets anywhere)",
+      "access": "any",
+      "phases": ["implement", "evaluate", "merge"],
+      "globs": [
+        ".env", ".env.*", ".dev.vars", ".dev.vars.*",
+        "*.pem", "*.key", "*.p12", "*.pfx", "id_rsa*", "id_ed25519*",
+        ".credentials.json",
+        "**/.ssh", "**/.ssh/**", "**/.aws", "**/.aws/**", "**/.config/gh/hosts.yml"
+      ]
+    },
+    {
+      "id": "ci-config",
+      "why": "CI config is not edited unless the issue's Touches name it",
+      "access": "write",
+      "phases": ["implement", "evaluate", "merge"],
+      "unless_touched": true,
+      "globs": [".github/**", ".gitlab-ci.yml", ".circleci/**"]
+    },
+    {
+      "id": "deploy-config",
+      "why": "deployment config is not edited unless the issue's Touches name it",
+      "access": "write",
+      "phases": ["implement", "evaluate", "merge"],
+      "unless_touched": true,
+      "globs": ["wrangler.toml", "wrangler.json", "wrangler.jsonc"]
+    },
+    {
+      "id": "release-scripts",
+      "why": "release tooling is never edited by an agent",
+      "access": "write",
+      "phases": ["implement", "evaluate", "merge"],
+      "globs": ["tools/release-*.sh"]
+    },
+    {
+      "id": "harness-files",
+      "why": "the hooks, their settings and the git internals fence the session; an agent never edits them",
+      "access": "write",
+      "phases": ["implement", "evaluate", "merge"],
+      "globs": [".claude/settings.json", ".claude/settings.local.json", ".claude/hooks/**", ".git", ".git/**", ".husky/**"]
+    },
+    {
+      "id": "project-rules",
+      "why": "AGENTS.md, CLAUDE.md and WORKFLOW.md are written by hand, not by the worker, unless the issue's Touches name them",
+      "access": "write",
+      "phases": ["implement", "evaluate", "merge"],
+      "unless_touched": true,
+      "globs": ["AGENTS.md", "CLAUDE.md", "WORKFLOW.md"]
+    }
+  ],
+  "commands": [
+    {
+      "id": "force-push",
+      "why": "never force-push; to catch up with main, merge origin/main into the branch",
+      "phases": ["implement", "evaluate", "merge"],
+      "patterns": ["^git\\b.*\\spush\\b.*\\s(--force\\S*|-[A-Za-z]*f[A-Za-z]*|\\+\\S+)(\\s|$)"]
+    },
+    {
+      "id": "push-to-main",
+      "why": "only the merge queue lands on main; a worker pushes its own branch",
+      "phases": ["implement", "evaluate", "merge"],
+      "patterns": ["^git\\b.*\\spush\\b.*\\s(\\S*:)?(refs/heads/)?(main|master)(\\s|$)"]
+    },
+    {
+      "id": "deploy",
+      "why": "no agent profile deploys",
+      "phases": ["implement", "evaluate", "merge"],
+      "patterns": [
+        "^wrangler\\b.*\\s(deploy|publish|rollback)\\b",
+        "^wrangler\\b.*\\sversions\\s+(deploy|upload)\\b",
+        "^wrangler\\b.*\\ssecret\\b",
+        "^(npm|pnpm|yarn|bun)\\s+publish\\b",
+        "^(npm|pnpm|yarn|bun)\\s+(run\\s+)?deploy\\b",
+        "^gh\\s+release\\s+(create|upload|edit|delete)\\b",
+        "^gh\\s+workflow\\s+run\\b"
+      ]
+    },
+    {
+      "id": "release-scripts",
+      "why": "release tooling is run by Rob, never by an agent",
+      "phases": ["implement", "evaluate", "merge"],
+      "patterns": ["(^|\\s)(\\S*/)?tools/release-\\S*\\.sh\\b"]
+    },
+    {
+      "id": "merge-pr",
+      "why": "only the merge agent's profile merges a PR",
+      "phases": ["implement", "evaluate"],
+      "patterns": ["^gh\\s+pr\\s+merge\\b", "^gh\\s+api\\b.*/merge\\b"]
+    },
+    {
+      "id": "evaluate-read-only",
+      "why": "the evaluator changes nothing: no commit, no push, no PR edits",
+      "phases": ["evaluate"],
+      "patterns": [
+        "^git\\b.*\\s(commit|push|merge|rebase|reset|cherry-pick|revert|am|apply|stash|tag|clean)(\\s|$)",
+        "^gh\\s+pr\\s+(create|edit|close|ready|review)\\b"
+      ]
+    }
+  ],
+  "scope": {
+    "outside_worktree": {
+      "id": "outside-worktree",
+      "why": "an agent writes inside its own worktree only",
+      "writable": ["<tmp>", "/dev/null", "/tmp/**"]
+    },
+    "outside_touches": {
+      "id": "outside-touches",
+      "why": "the issue's Touches are the lease; ask on the issue for another file instead of editing it",
+      "always_writable": ["PROGRESS.md", "for-rob/**"],
+      "new_tests": ["**/*.test.*", "**/*.spec.*", "tests/**", "test/**", "**/__tests__/**"]
+    },
+    "read_only_phase": {
+      "id": "read-only-phase",
+      "why": "this phase changes no file"
+    }
+  },
+  "caps": {
+    "wall_time": {
+      "id": "cap-wall-time",
+      "why": "the wall-time cap is spent: commit, write PROGRESS.md, push and stop",
+      "still_allowed_commands": ["^git\\s+(status|diff|log|add|commit|push)\\b"],
+      "still_allowed_writes": ["PROGRESS.md"]
+    }
+  },
+  "stop": {
+    "phases": {
+      "implement": { "gate": true, "commit": true },
+      "evaluate": { "gate": false, "commit": false },
+      "merge": { "gate": true, "commit": false }
+    },
+    "timeout_seconds": 1800,
+    "output_tail_chars": 6000
+  }
+}

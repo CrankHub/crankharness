@@ -16,6 +16,7 @@ This repository holds everything that is **not** project-specific. What a projec
 | [`templates/WORKFLOW.md`](templates/WORKFLOW.md) | the runtime policy file the daemon reads, to copy and fill in |
 | [`dod/issue.md`](dod/issue.md) | the issue-level definition of done (14 lines; the merge agent marks Done) |
 | [`dod/project.md`](dod/project.md) | the project-level definition of done: the one human review, per Linear project |
+| [`hooks/`](hooks/README.md) | the fence around a headless worker: deny rules per phase in `hooks/rules.json`, a Stop hook that runs the gate, and `node hooks/install.mjs --worktree <path> --phase <phase> [--touches <globs>]` (ROB-405) |
 | [`risk.md`](risk.md) | the default risk list (what is high), what a flag does and never does, and how an agent proposes a change in `PROGRESS.md` |
 | [`COMPLETION.md`](COMPLETION.md) | what finished means: Rob's requirements of Nov 14, 2026, the issue that delivers each, the stages, and the order |
 | [`ORCHESTRATOR.md`](ORCHESTRATOR.md) | the one orchestrator per project: its loop, validating a task, carrying a change through, assigning work, the merge queue |
