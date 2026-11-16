@@ -1,0 +1,777 @@
+#!/usr/bin/env node
+// dispatch: one issue in, one draft PR out (ROB-404).
+//
+//   node dispatch/dispatch.mjs --repo <checkout> --issue <KEY> [--issue-file <path>]
+//                              [--provider claude|codex|grok] [--model <name>] [--dry-run]
+//                              [--worker-cmd <command>] [--gh-cmd <command>]
+//
+// Steps, in order: the contract check; WORKFLOW.md; the worktree and branch; the hooks; the
+// headless worker; the local gate; the evaluator (the worker remediates on a failure, up to the
+// caps); push and a draft PR; the run record <repo>/.harness/runs/<KEY>/dispatch.json.
+//
+// The script never reads the tracker and never holds a key: the issue text comes from
+// --issue-file, the worker runs on its own subscription login, and gh runs on Rob's login.
+// Posting the PR link on the issue and moving its state are left to the caller ("next" in the
+// run record).
+//
+// Exit 0: a draft PR was opened (or, with --dry-run, the plan printed). 1: refused or stopped.
+// 2: a usage error or an unexpected failure.
+//
+// A command given with --worker-cmd and the like is a JSON array (["node","w.mjs"]) or words
+// split on spaces ("node w.mjs"). The worker gets its prompt on stdin, runs in the worktree, and
+// also finds it in the file named by CRANKHARNESS_PROMPT_FILE.
+
+import { existsSync, readFileSync, writeFileSync, mkdirSync, appendFileSync, copyFileSync, statSync } from 'node:fs';
+import { resolve, join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { checkContract, parseFrontMatter } from '../check-contract.mjs';
+
+export const HARNESS_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+export const PROVIDERS = ['claude', 'codex', 'grok'];
+// What a claude worker may use without asking. The hooks (ROB-405) are the guard on what Bash
+// may do and which files may be written; this list only keeps the session headless.
+export const CLAUDE_TOOLS = ['Read', 'Edit', 'Write', 'Glob', 'Grep', 'Bash'];
+const MAX_BUFFER = 256 * 1024 * 1024;
+
+class UsageError extends Error {}
+class StopError extends Error {}
+
+// --- arguments --------------------------------------------------------------------------------
+
+export function parseArgs(argv) {
+  const opts = { provider: 'claude', dryRun: false };
+  const valued = {
+    '--repo': 'repo',
+    '--issue': 'issue',
+    '--issue-file': 'issueFile',
+    '--provider': 'provider',
+    '--model': 'model',
+    '--worker-cmd': 'workerCmd',
+    '--gh-cmd': 'ghCmd',
+  };
+  for (let i = 0; i < argv.length; i += 1) {
+    const a = argv[i];
+    if (a === '--dry-run') {
+      opts.dryRun = true;
+    } else if (a in valued) {
+      if (i + 1 >= argv.length) throw new UsageError(`${a} needs a value`);
+      opts[valued[a]] = argv[i + 1];
+      i += 1;
+    } else {
+      throw new UsageError(`unknown argument: ${a}`);
+    }
+  }
+  if (!opts.repo) throw new UsageError('--repo <checkout> is required');
+  if (!opts.issue) throw new UsageError('--issue <KEY> is required');
+  if (!/^[A-Z][A-Z0-9]*-\d+$/.test(opts.issue)) throw new UsageError(`--issue ${opts.issue} is not an issue key like CMD-21`);
+  if (!PROVIDERS.includes(opts.provider)) throw new UsageError(`--provider ${opts.provider}: one of ${PROVIDERS.join(', ')}`);
+  opts.workerCmd ??= process.env.CRANKHARNESS_WORKER_CMD;
+  opts.ghCmd ??= process.env.CRANKHARNESS_GH_CMD;
+  return opts;
+}
+
+export function parseCommand(text) {
+  const s = String(text).trim();
+  if (s.startsWith('[')) {
+    const arr = JSON.parse(s);
+    if (!Array.isArray(arr) || arr.length === 0 || !arr.every((x) => typeof x === 'string')) {
+      throw new UsageError(`not a command: ${s}`);
+    }
+    return arr;
+  }
+  const out = [];
+  const re = /"([^"]*)"|(\S+)/g;
+  let m;
+  while ((m = re.exec(s))) out.push(m[1] ?? m[2]);
+  if (out.length === 0) throw new UsageError('an empty command');
+  return out;
+}
+
+// --- the issue ---------------------------------------------------------------------------------
+
+export function slugify(title, max = 40) {
+  const words = String(title || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .split(' ')
+    .filter(Boolean);
+  let slug = '';
+  for (const w of words) {
+    const next = slug ? `${slug}-${w}` : w;
+    if (next.length > max) break;
+    slug = next;
+  }
+  return slug || (words[0] || '').slice(0, max);
+}
+
+function section(markdown, name) {
+  const lines = markdown.split(/\r?\n/);
+  const start = lines.findIndex((l) => new RegExp(`^#{1,6}\\s*${name}\\b`, 'i').test(l.trim()));
+  if (start === -1) return null;
+  const out = [];
+  for (let i = start + 1; i < lines.length; i += 1) {
+    if (/^#{1,6}\s/.test(lines[i].trim())) break;
+    out.push(lines[i]);
+  }
+  return out.join('\n').trim();
+}
+
+// The issue file is the issue as Markdown: a first heading "# KEY: title" (or "# title"), an
+// optional "Labels: a, b" line, then the body with its sections (Goal, Touches, ...).
+export function readIssue(key, file) {
+  if (!file) return { key, title: null, labels: null, touches: [], body: null, source: null };
+  const text = readFileSync(file, 'utf8');
+  const lines = text.split(/\r?\n/);
+  let title = null;
+  const h1 = lines.find((l) => /^#\s+\S/.test(l));
+  if (h1) title = h1.replace(/^#\s+/, '').replace(new RegExp(`^${key}\\s*[:·—-]\\s*`), '').trim();
+  let labels = null;
+  const lab = lines.find((l) => /^\**labels\**\s*:/i.test(l.trim()));
+  if (lab) labels = lab.replace(/^[^:]*:/, '').split(',').map((s) => s.replace(/[`*]/g, '').trim()).filter(Boolean);
+  const touchesText = section(text, 'Touches');
+  let touches = [];
+  if (touchesText) {
+    const ticked = [...touchesText.matchAll(/`([^`]+)`/g)].map((m) => m[1].trim());
+    touches = ticked.length
+      ? ticked
+      : touchesText.split(/[\n,]/).map((s) => s.replace(/^[\s*-]+/, '').trim()).filter(Boolean);
+  }
+  return { key, title, labels, touches, body: text, source: resolve(file) };
+}
+
+export function touchesGlobs(touches, fallback) {
+  if (!touches || touches.length === 0) return String(fallback ?? 'lane');
+  return touches.map((t) => (t.endsWith('/') ? `${t}**` : t)).join(',');
+}
+
+export function branchName(pattern, key, slug) {
+  return pattern
+    .replace('<ISSUE-ID>', key)
+    .replace('<slug>', slug || '')
+    .replace(/[-/]+$/, '');
+}
+
+// --- the worker --------------------------------------------------------------------------------
+
+export function workerCommand(provider, { override, model } = {}) {
+  if (override) return { argv: parseCommand(override), via: 'injected' };
+  if (provider === 'claude') {
+    const argv = ['claude', '-p', '--output-format', 'json', '--permission-mode', 'acceptEdits'];
+    if (model) argv.push('--model', model);
+    argv.push('--allowedTools', ...CLAUDE_TOOLS);
+    return { argv, via: 'claude -p' };
+  }
+  if (provider === 'codex') {
+    const argv = [process.platform === 'win32' ? 'codex.cmd' : 'codex', 'exec', '--json', '--sandbox', 'workspace-write'];
+    if (model) argv.push('--model', model);
+    argv.push('-');
+    return { argv, via: 'codex exec' };
+  }
+  return {
+    pending: 'grok worker pending: no headless Grok Bot command yet (ROB-403, the Grok login); pass --worker-cmd to supply one',
+  };
+}
+
+// --- running things ----------------------------------------------------------------------------
+
+function quoteWin(a) {
+  return /[\s"&|<>^]/.test(a) ? `"${a.replace(/"/g, '""')}"` : a;
+}
+
+export function run(argv, { cwd, input, env, timeout } = {}) {
+  let [cmd, ...args] = argv;
+  let extra = {};
+  if (process.platform === 'win32' && /\.(cmd|bat)$/i.test(cmd)) {
+    args = ['/d', '/s', '/c', `"${[cmd, ...args].map(quoteWin).join(' ')}"`];
+    cmd = 'cmd.exe';
+    extra = { windowsVerbatimArguments: true };
+  }
+  const started = Date.now();
+  const r = spawnSync(cmd, args, {
+    cwd,
+    input,
+    env: env ? { ...process.env, ...env } : process.env,
+    encoding: 'utf8',
+    maxBuffer: MAX_BUFFER,
+    timeout,
+    windowsHide: true,
+    ...extra,
+  });
+  return {
+    code: r.status ?? (r.error ? 127 : 1),
+    out: r.stdout || '',
+    err: (r.stderr || '') + (r.error ? `\n${r.error.message}` : ''),
+    timedOut: r.error?.code === 'ETIMEDOUT',
+    seconds: Math.round((Date.now() - started) / 100) / 10,
+  };
+}
+
+// The gate is a shell command. On Windows, use Git's own bash: a bare "bash" can be WSL's.
+export function bashPath() {
+  if (process.platform !== 'win32') return 'bash';
+  const r = run(['git', '--exec-path']);
+  if (r.code === 0) {
+    const root = resolve(r.out.trim(), '..', '..', '..');
+    for (const p of [join(root, 'bin', 'bash.exe'), join(root, 'usr', 'bin', 'bash.exe')]) if (existsSync(p)) return p;
+  }
+  return 'bash';
+}
+
+function git(args, cwd) {
+  return run(['git', ...args], { cwd });
+}
+
+function gitOk(args, cwd) {
+  const r = git(args, cwd);
+  if (r.code !== 0) throw new Error(`git ${args.join(' ')} failed: ${(r.err || r.out).trim()}`);
+  return r.out.trim();
+}
+
+function tail(text, n = 40) {
+  const lines = String(text).replace(/\s+$/, '').split(/\r?\n/);
+  return lines.slice(-n).join('\n');
+}
+
+function sha256(text) {
+  return createHash('sha256').update(text).digest('hex');
+}
+
+// --- the plan ----------------------------------------------------------------------------------
+
+function baseRef(repo) {
+  const hasOrigin = git(['remote', 'get-url', 'origin'], repo).code === 0;
+  if (hasOrigin) {
+    const head = git(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'], repo);
+    if (head.code === 0 && head.out.trim()) {
+      const ref = head.out.trim();
+      return { hasOrigin, ref, branch: ref.replace(/^origin\//, '') };
+    }
+    for (const b of ['main', 'master']) {
+      if (git(['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${b}`], repo).code === 0) {
+        return { hasOrigin, ref: `origin/${b}`, branch: b };
+      }
+    }
+    return { hasOrigin, ref: 'origin/main', branch: 'main' };
+  }
+  for (const b of ['main', 'master']) {
+    if (git(['rev-parse', '--verify', '--quiet', `refs/heads/${b}`], repo).code === 0) return { hasOrigin, ref: b, branch: b };
+  }
+  return { hasOrigin, ref: 'HEAD', branch: 'main' };
+}
+
+function optionalCommand(file) {
+  const path = join(HARNESS_ROOT, file);
+  if (existsSync(path)) return { argv: [process.execPath, path], present: true, via: file };
+  return { argv: null, present: false, via: file };
+}
+
+export function makePlan(opts) {
+  const repo = resolve(opts.repo);
+  const key = opts.issue;
+  const refusals = [];
+  const notes = [];
+  const plan = { repo, key, provider: opts.provider, dryRun: opts.dryRun, refusals, notes };
+
+  if (!existsSync(repo) || !statSync(repo).isDirectory()) {
+    refusals.push(`${repo} is not a directory`);
+    return plan;
+  }
+  if (git(['rev-parse', '--show-toplevel'], repo).code !== 0) {
+    refusals.push(`${repo} is not a git repository`);
+    return plan;
+  }
+
+  // 1. The contract.
+  plan.contract = checkContract(repo);
+  if (!plan.contract.pass) refusals.push(`the repository fails the contract: ${plan.contract.missing} missing (CONTRACT.md)`);
+
+  // 2. WORKFLOW.md.
+  const wfPath = join(repo, 'WORKFLOW.md');
+  if (existsSync(wfPath)) {
+    const text = readFileSync(wfPath, 'utf8');
+    const parsed = parseFrontMatter(text);
+    if (!parsed.error) {
+      const wf = parsed.data;
+      plan.workflow = {
+        sha256: sha256(text),
+        ready_label: wf.tracker?.ready_label || 'agent-ready',
+        branch_pattern: wf.branch?.pattern,
+        gate: wf.gate?.local,
+        touches_default: wf.touches?.default,
+        caps: {
+          cycles: wf.caps?.cycles ?? 8,
+          same_failure: wf.caps?.same_failure ?? 3,
+          turns: wf.caps?.turns ?? 80,
+          wall_minutes: wf.caps?.wall_minutes ?? 90,
+        },
+      };
+    }
+  }
+  if (!plan.workflow) return plan;
+
+  // The issue.
+  if (opts.issueFile && !existsSync(opts.issueFile)) {
+    refusals.push(`--issue-file ${opts.issueFile} does not exist`);
+    return plan;
+  }
+  plan.issue = readIssue(key, opts.issueFile);
+  if (!plan.issue.body) {
+    if (opts.dryRun) notes.push('no --issue-file: a real dispatch needs one (the issue body is the spec; this script never reads the tracker)');
+    else refusals.push('no --issue-file: the issue body is the spec, and this script never reads the tracker');
+  }
+  if (plan.issue.labels) {
+    if (!plan.issue.labels.includes(plan.workflow.ready_label)) {
+      refusals.push(`${key} is not labeled ${plan.workflow.ready_label} (labels: ${plan.issue.labels.join(', ') || 'none'})`);
+    }
+  } else {
+    notes.push(`labels not checked: the issue file has no "Labels:" line (the caller checks ${plan.workflow.ready_label})`);
+  }
+  notes.push('blockers not checked here: the caller confirms every blocker is merged before dispatching');
+
+  // The names.
+  plan.slug = slugify(plan.issue.title);
+  plan.branch = branchName(plan.workflow.branch_pattern, key, plan.slug);
+  plan.base = baseRef(repo);
+  plan.worktree = join(repo, '.harness', 'worktrees', key);
+  plan.runDir = join(repo, '.harness', 'runs', key);
+  plan.touches = touchesGlobs(plan.issue.touches, plan.workflow.touches_default);
+  plan.gate = String(plan.workflow.gate).replace(/<ref>/g, plan.branch);
+
+  // The parts.
+  plan.hooks = optionalCommand('hooks/install.mjs');
+  plan.evaluator = optionalCommand('evaluator/evaluate.mjs');
+  plan.worker = workerCommand(opts.provider, { override: opts.workerCmd, model: opts.model });
+  if (plan.worker.pending) refusals.push(plan.worker.pending);
+  if (opts.provider === 'codex' && !opts.workerCmd) notes.push('codex worker: the command is wired but not yet run for real (ROB-403, the Codex login)');
+  plan.gh = opts.ghCmd ? parseCommand(opts.ghCmd) : ['gh'];
+  if (!plan.base.hasOrigin) notes.push('no origin remote: the branch starts from the local main, and push and the PR will stop the run');
+  return plan;
+}
+
+function hooksArgv(plan) {
+  return [...plan.hooks.argv, '--worktree', plan.worktree, '--phase', 'implement', '--touches', plan.touches];
+}
+
+function evaluatorArgv(plan) {
+  return [...plan.evaluator.argv, '--repo', plan.worktree, '--issue', plan.key, '--branch', plan.branch, '--provider', plan.provider];
+}
+
+function prTitle(plan) {
+  return plan.issue.title ? `${plan.key}: ${plan.issue.title}` : plan.key;
+}
+
+function show(argv) {
+  return argv.map((a) => (/\s/.test(a) ? `"${a}"` : a)).join(' ');
+}
+
+export function renderPlan(plan) {
+  const out = [`dispatch${plan.dryRun ? ' (dry run)' : ''}: ${plan.key} on ${plan.repo}`];
+  if (plan.contract) {
+    const c = plan.contract;
+    out.push(`  contract   ${c.pass ? (c.pending ? `PASS (${c.pending} pending)` : 'PASS') : `FAIL: ${c.missing} missing`}`);
+    for (const l of c.lines) out.push(`           ${l.trim()}`);
+  }
+  if (plan.workflow) {
+    const k = plan.workflow.caps;
+    out.push(`  workflow   WORKFLOW.md sha256 ${plan.workflow.sha256.slice(0, 12)}; caps: ${k.cycles} cycles, stop after ${k.same_failure} on the same failure, ${k.turns} turns, ${k.wall_minutes} min`);
+  }
+  if (plan.issue) {
+    out.push(`  issue      ${prTitle(plan)}${plan.issue.source ? ` (from ${plan.issue.source})` : ''}`);
+    if (plan.issue.labels) out.push(`  labels     ${plan.issue.labels.join(', ')}`);
+    out.push(`  touches    ${plan.touches}`);
+  }
+  if (plan.branch) {
+    out.push(`  branch     ${plan.branch} from ${plan.base.ref}`);
+    out.push(`  worktree   ${plan.worktree}`);
+    out.push(`  run folder ${plan.runDir}`);
+    out.push('  exclude    .harness/ goes in .git/info/exclude (never the project .gitignore)');
+    out.push('  steps');
+    out.push(`    1 hooks      ${plan.hooks.present ? show(hooksArgv(plan)) : 'hooks pending (hooks/install.mjs not here yet: ROB-405)'}`);
+    out.push(`    2 worker     ${plan.worker.argv ? `${show(plan.worker.argv)}  (prompt on stdin, cwd = the worktree)` : plan.worker.pending}`);
+    out.push(`    3 gate       bash -c ${JSON.stringify(plan.gate)}  (cwd = the worktree)`);
+    out.push(`    4 evaluator  ${plan.evaluator.present ? show(evaluatorArgv(plan)) : 'evaluator pending (evaluator/evaluate.mjs not here yet: ROB-406)'}`);
+    out.push(`      on a gate failure or NEEDS_WORK the worker runs again with the failure, up to ${plan.workflow.caps.cycles} cycles`);
+    out.push(`    5 push       git push -u origin ${plan.branch}`);
+    out.push(`    6 draft PR   ${show(plan.gh)} pr create --draft --base ${plan.base.branch} --head ${plan.branch} --title ${JSON.stringify(prTitle(plan))}`);
+    out.push(`    7 record     ${join(plan.runDir, 'dispatch.json')}`);
+  }
+  for (const n of plan.notes) out.push(`  note       ${n}`);
+  for (const r of plan.refusals) out.push(`  REFUSED    ${r}`);
+  if (plan.refusals.length) out.push(`REFUSED: ${plan.refusals.length} reason${plan.refusals.length > 1 ? 's' : ''}`);
+  else if (plan.dryRun) out.push('dry run: nothing was created, run or pushed');
+  return out.join('\n');
+}
+
+// --- the prompt --------------------------------------------------------------------------------
+
+export function buildPrompt(plan, { cycle, feedback }) {
+  const k = plan.workflow.caps;
+  const lines = [
+    `You are a CrankHarness worker. One issue, one session, this worktree, this branch.`,
+    '',
+    `Issue: ${prTitle(plan)}`,
+    `Branch: ${plan.branch} (already checked out here; do not switch branches, do not push, do not open a PR: the harness does that)`,
+    `Touches, your lease: ${plan.touches}`,
+    `Cycle ${cycle} of at most ${k.cycles}.`,
+    '',
+    'Rules:',
+    '- Read AGENTS.md and WORKFLOW.md first and follow them; the issue below is the spec.',
+    '- Keep a progress file at .harness/PROGRESS.md (it is not committed): what is done, what is next, and anything for Rob. Read it first if it exists: a retry resumes from it.',
+    `- Before you stop, run the local gate and make it pass: ${plan.gate}`,
+    `- Commit your work on this branch; start every commit message with ${plan.key}.`,
+    '- Stop and say why in .harness/PROGRESS.md if you cannot go on (a stop condition in AGENTS.md).',
+  ];
+  if (feedback) {
+    lines.push('', `The last cycle did not pass. Fix this first:`, '', feedback);
+  }
+  lines.push('', '--- the issue ---', '', plan.issue.body || `(no issue text was supplied for ${plan.key})`);
+  return lines.join('\n');
+}
+
+// --- the run -----------------------------------------------------------------------------------
+
+function readJson(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    const last = String(text).trim().split(/\r?\n/).pop();
+    try {
+      return JSON.parse(last);
+    } catch {
+      return null;
+    }
+  }
+}
+
+function excludeHarness(worktree) {
+  const path = gitOk(['rev-parse', '--path-format=absolute', '--git-path', 'info/exclude'], worktree);
+  mkdirSync(dirname(path), { recursive: true });
+  const now = existsSync(path) ? readFileSync(path, 'utf8') : '';
+  if (!now.split(/\r?\n/).some((l) => l.trim() === '.harness/' || l.trim() === '/.harness/')) {
+    appendFileSync(path, `${now && !now.endsWith('\n') ? '\n' : ''}# CrankHarness run folders and worktrees\n.harness/\n`);
+  }
+  return path;
+}
+
+function prepareWorktree(plan, record) {
+  const { repo, worktree, branch, base } = plan;
+  if (base.hasOrigin) {
+    const f = git(['fetch', 'origin'], repo);
+    if (f.code !== 0) record.notes.push(`git fetch origin failed; working from what is here: ${tail(f.err, 3)}`);
+  }
+  const branchExists = git(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], repo).code === 0;
+  if (existsSync(join(worktree, '.git'))) {
+    record.worktree_state = 'resumed';
+  } else if (branchExists) {
+    gitOk(['worktree', 'add', worktree, branch], repo);
+    record.worktree_state = 'resumed (branch existed)';
+  } else {
+    gitOk(['worktree', 'add', '-b', branch, worktree, base.ref], repo);
+    record.worktree_state = 'created';
+  }
+  if (record.worktree_state !== 'created') {
+    // Catch up with main by a merge commit, never a rebase.
+    const m = git(['merge', '--no-edit', base.ref], worktree);
+    if (m.code !== 0) {
+      git(['merge', '--abort'], worktree);
+      throw new StopError(`merge of ${base.ref} into ${branch} has conflicts; resolve by hand, then dispatch again`);
+    }
+  }
+  record.base_sha = gitOk(['rev-parse', base.ref], repo);
+  record.exclude = excludeHarness(worktree);
+}
+
+
+function commitLeftovers(plan) {
+  const status = git(['status', '--porcelain'], plan.worktree).out.trim();
+  if (!status) return false;
+  gitOk(['add', '-A'], plan.worktree);
+  gitOk(['commit', '-m', `${plan.key}: work the worker left uncommitted (committed by dispatch)`], plan.worktree);
+  return true;
+}
+
+function hasChanges(plan) {
+  return git(['diff', '--quiet', plan.base.ref, 'HEAD'], plan.worktree).code !== 0;
+}
+
+function failureSignature(kind, text) {
+  const norm = String(text)
+    .replace(/\d+(\.\d+)?\s*(ms|s)\b/g, '')
+    .replace(/[0-9a-f]{7,40}/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return `${kind}:${sha256(norm).slice(0, 16)}`;
+}
+
+function prBody(plan, record) {
+  const last = record.cycles[record.cycles.length - 1] || {};
+  const log = git(['log', '--oneline', '--no-merges', `${plan.base.ref}..HEAD`], plan.worktree).out.trim();
+  const stat = git(['diff', '--stat', plan.base.ref, 'HEAD'], plan.worktree).out.trim();
+  const verdict = last.evaluation?.verdict;
+  const lines = [
+    `Dispatched by CrankHarness (\`dispatch/dispatch.mjs\`, provider ${plan.provider}). Draft: it never merges itself.`,
+    '',
+    '## What shipped',
+    '',
+    '```text',
+    log || '(no commits)',
+    '',
+    stat,
+    '```',
+    '',
+  ];
+  if (record.worker_summary) lines.push('The worker says:', '', `> ${record.worker_summary.split('\n').join('\n> ')}`, '');
+  lines.push(
+    '## Proven, and by what command',
+    '',
+    `- Local gate: \`${plan.gate}\` exited ${last.gate?.exit} in the worktree (cycle ${last.n}).`,
+    plan.evaluator.present
+      ? `- Evaluator: \`evaluator/evaluate.mjs --issue ${plan.key} --branch ${plan.branch}\` returned ${verdict ?? 'no verdict'} (exit ${last.evaluation?.exit}).`
+      : '- Evaluator: not yet provable (evaluator pending, ROB-406).',
+    `- Contract: \`check-contract.mjs\` ${plan.contract.pass ? 'PASS' : 'FAIL'} before the run.`,
+    '',
+    '## Assumed, not proven',
+    '',
+    plan.hooks.present ? '- The hooks were installed for the implement phase.' : '- The hooks did not guard this run (hooks pending, ROB-405).',
+    '- Everything in the issue-level definition of done that no gate above proves (`dod/issue.md`, "Which lines each phase can prove").',
+    '',
+    '## Outstanding',
+    '',
+    record.stop ? `- Stopped: ${record.stop}` : '- Nothing the run knows of.',
+    `- The issue is not yet commented with this PR's link and not moved: that is the caller's (see \`next\` in the run record).`,
+    '',
+    '## Run folder',
+    '',
+    `\`${plan.runDir}\` on the machine that ran the dispatch (dispatch.json, prompt, worker output, gate output, evaluation, progress file).`,
+    `Cycles: ${record.cycles.length}. First-pass PASS: ${record.first_pass_pass === null ? 'unknown (evaluator pending)' : record.first_pass_pass}.`,
+  );
+  return lines.join('\n');
+}
+
+export function dispatch(opts, { log = console.log } = {}) {
+  const plan = makePlan(opts);
+  if (opts.dryRun || plan.refusals.length) {
+    log(renderPlan(plan));
+    return { exit: plan.refusals.length ? 1 : 0, plan };
+  }
+
+  const started = Date.now();
+  const k = plan.workflow.caps;
+  const deadline = started + k.wall_minutes * 60 * 1000;
+  mkdirSync(plan.runDir, { recursive: true });
+  const record = {
+    harness: 'crankharness',
+    record: 'dispatch',
+    version: 1,
+    issue: plan.key,
+    title: plan.issue.title,
+    provider: plan.provider,
+    worker: plan.worker.via,
+    repo: plan.repo,
+    worktree: plan.worktree,
+    branch: plan.branch,
+    base: plan.base.ref,
+    started_at: new Date(started).toISOString(),
+    finished_at: null,
+    wall_seconds: null,
+    workflow: { sha256: plan.workflow.sha256, caps: k, gate: plan.gate, touches: plan.touches },
+    contract: { pass: plan.contract.pass, pending: plan.contract.pending, lines: plan.contract.lines.map((l) => l.trim()) },
+    hooks: plan.hooks.present ? 'not run' : 'hooks pending',
+    evaluator: plan.evaluator.present ? 'not run' : 'evaluator pending',
+    cycles: [],
+    turns: 0,
+    // What ROB-407 measures. first_pass_pass: the first cycle passed the gate and the evaluator
+    // (null while the evaluator is pending). human_interventions: each time Rob had to step in on
+    // this issue; the dispatch itself needs none, and ROB-407 adds to it.
+    first_pass_gate: null,
+    first_pass_pass: null,
+    human_interventions: 0,
+    interventions: [],
+    stop: null,
+    pushed: false,
+    pr: null,
+    final_state: 'running',
+    notes: [...plan.notes],
+    next: [],
+  };
+  const recordPath = join(plan.runDir, 'dispatch.json');
+  const save = () => writeFileSync(recordPath, `${JSON.stringify(record, null, 2)}\n`);
+  save();
+  log(`dispatch: ${plan.key} -> ${plan.branch}`);
+
+  let exit = 1;
+  try {
+    // 3. The worktree and branch.
+    prepareWorktree(plan, record);
+    log(`  worktree   ${record.worktree_state}: ${plan.worktree}`);
+    save();
+
+    // 4. The hooks.
+    if (plan.hooks.present) {
+      const h = run(hooksArgv(plan), { cwd: plan.worktree });
+      writeFileSync(join(plan.runDir, 'hooks.txt'), h.out + h.err);
+      if (h.code !== 0) {
+        record.hooks = `failed (exit ${h.code})`;
+        throw new StopError(`the hooks did not install (exit ${h.code}): ${tail(h.err || h.out, 5)}`);
+      }
+      record.hooks = 'installed';
+    }
+    log(`  hooks      ${record.hooks}`);
+    save();
+
+    // 5-7. Worker, gate, evaluator; the worker remediates until a pass or a cap.
+    const seen = new Map();
+    let feedback = null;
+    let passed = false;
+    for (let n = 1; n <= k.cycles; n += 1) {
+      const cycle = { n };
+      record.cycles.push(cycle);
+      const left = deadline - Date.now();
+      if (left <= 0) throw new StopError(`wall time cap: ${k.wall_minutes} min`);
+      if (record.turns >= k.turns) throw new StopError(`turn cap: ${k.turns} turns`);
+
+      const prompt = buildPrompt(plan, { cycle: n, feedback });
+      const promptFile = join(plan.runDir, n === 1 ? 'prompt.md' : `prompt-${n}.md`);
+      writeFileSync(promptFile, prompt);
+      const w = run(plan.worker.argv, {
+        cwd: plan.worktree,
+        input: prompt,
+        timeout: left,
+        env: { CRANKHARNESS_PROMPT_FILE: promptFile, CRANKHARNESS_ISSUE: plan.key, CRANKHARNESS_CYCLE: String(n) },
+      });
+      writeFileSync(join(plan.runDir, `worker-${n}.out.json`), w.out);
+      if (w.err.trim()) writeFileSync(join(plan.runDir, `worker-${n}.err.txt`), w.err);
+      const json = readJson(w.out);
+      cycle.worker = { exit: w.code, seconds: w.seconds };
+      if (json && typeof json === 'object') {
+        if (Number.isInteger(json.num_turns)) cycle.worker.turns = json.num_turns;
+        if (json.usage) cycle.worker.usage = json.usage;
+        if (json.session_id) cycle.worker.session_id = json.session_id;
+        if (typeof json.result === 'string') record.worker_summary = json.result.slice(0, 2000);
+      }
+      record.turns += cycle.worker.turns ?? 0;
+      const progress = join(plan.worktree, '.harness', 'PROGRESS.md');
+      if (existsSync(progress)) copyFileSync(progress, join(plan.runDir, 'PROGRESS.md'));
+      log(`  worker     cycle ${n}: exit ${w.code} in ${w.seconds}s`);
+      save();
+      if (w.timedOut) throw new StopError(`wall time cap: ${k.wall_minutes} min (the worker was stopped)`);
+      if (w.code !== 0) throw new StopError(`the worker exited ${w.code}: ${tail(w.err || w.out, 5)}`);
+      cycle.committed_by_dispatch = commitLeftovers(plan);
+      if (!hasChanges(plan)) throw new StopError('the worker made no change');
+
+      // 6. The local gate.
+      const g = run([bashPath(), '-c', plan.gate], { cwd: plan.worktree, timeout: Math.max(deadline - Date.now(), 1000) });
+      writeFileSync(join(plan.runDir, `gate-${n}.txt`), g.out + g.err);
+      cycle.gate = { exit: g.code, seconds: g.seconds };
+      log(`  gate       cycle ${n}: exit ${g.code}`);
+      save();
+      let failure = null;
+      if (g.code !== 0) {
+        failure = { sig: failureSignature('gate', tail(g.out + g.err)), text: `The local gate \`${plan.gate}\` exited ${g.code}:\n\n${tail(g.out + g.err)}` };
+      } else if (plan.evaluator.present) {
+        // 7. The evaluator.
+        const e = run(evaluatorArgv(plan), { cwd: plan.worktree, timeout: Math.max(deadline - Date.now(), 1000) });
+        writeFileSync(join(plan.runDir, `evaluator-${n}.txt`), e.out + e.err);
+        const evalPath = join(plan.worktree, '.harness', 'runs', plan.key, 'evaluation.json');
+        let evaluation = null;
+        if (existsSync(evalPath)) {
+          const text = readFileSync(evalPath, 'utf8');
+          writeFileSync(join(plan.runDir, n === 1 ? 'evaluation.json' : `evaluation-${n}.json`), text);
+          evaluation = readJson(text);
+        }
+        const verdict = { 0: 'PASS', 1: 'NEEDS_WORK' }[e.code] ?? 'error';
+        cycle.evaluation = { exit: e.code, verdict };
+        record.evaluator = 'ran';
+        log(`  evaluator  cycle ${n}: ${verdict}`);
+        save();
+        if (e.code === 2 || verdict === 'error') throw new StopError(`the evaluator failed (exit ${e.code}): ${tail(e.err || e.out, 5)}`);
+        if (e.code === 1) {
+          const detail = evaluation ? JSON.stringify({ summary: evaluation.summary, findings: evaluation.findings }, null, 2) : tail(e.out + e.err);
+          failure = { sig: failureSignature('evaluator', detail), text: `The evaluator returned NEEDS_WORK:\n\n${detail}` };
+        }
+      }
+      if (n === 1) {
+        record.first_pass_gate = g.code === 0;
+        record.first_pass_pass = plan.evaluator.present ? !failure : null;
+      }
+      if (!failure) {
+        passed = true;
+        break;
+      }
+      const count = (seen.get(failure.sig) || 0) + 1;
+      seen.set(failure.sig, count);
+      cycle.failure = failure.sig;
+      if (count >= k.same_failure) throw new StopError(`the same failure ${count} times in a row (cap ${k.same_failure}): ${failure.text.split('\n')[0]}`);
+      feedback = failure.text;
+    }
+    if (!passed) throw new StopError(`cycle cap: ${k.cycles} cycles without a pass`);
+
+    // 8. Push and a draft PR.
+    if (!plan.base.hasOrigin) throw new StopError('no origin remote to push to');
+    const p = git(['push', '-u', 'origin', plan.branch], plan.worktree);
+    writeFileSync(join(plan.runDir, 'push.txt'), p.out + p.err);
+    if (p.code !== 0) throw new StopError(`git push failed: ${tail(p.err, 5)}`);
+    record.pushed = true;
+    log(`  push       origin ${plan.branch}`);
+    const bodyFile = join(plan.runDir, 'pr-body.md');
+    writeFileSync(bodyFile, prBody(plan, record));
+    const pr = run([...plan.gh, 'pr', 'create', '--draft', '--base', plan.base.branch, '--head', plan.branch, '--title', prTitle(plan), '--body-file', bodyFile], { cwd: plan.worktree });
+    writeFileSync(join(plan.runDir, 'pr.txt'), pr.out + pr.err);
+    if (pr.code !== 0) throw new StopError(`gh pr create failed: ${tail(pr.err || pr.out, 5)}`);
+    const url = (pr.out.match(/https?:\/\/\S+/g) || []).pop() || pr.out.trim();
+    record.pr = { url, draft: true, title: prTitle(plan) };
+    record.final_state = 'draft-pr';
+    record.next.push(`comment the PR link on ${plan.key}: ${url}`);
+    log(`  draft PR   ${url}`);
+    exit = 0;
+  } catch (err) {
+    if (err instanceof StopError) {
+      record.stop = err.message;
+      record.final_state = 'stopped';
+      record.next.push(`move ${plan.key} to Blocked with this note: ${err.message}`);
+      log(`  STOPPED    ${err.message}`);
+      exit = 1;
+    } else {
+      record.stop = `error: ${err.message}`;
+      record.final_state = 'error';
+      log(`  ERROR      ${err.message}`);
+      exit = 2;
+    }
+  } finally {
+    record.finished_at = new Date().toISOString();
+    record.wall_seconds = Math.round((Date.now() - started) / 1000);
+    if (existsSync(join(plan.worktree, '.git'))) {
+      const d = git(['diff', plan.base.ref, 'HEAD'], plan.worktree);
+      if (d.code === 0) writeFileSync(join(plan.runDir, 'diff.patch'), d.out);
+    }
+    save();
+    log(`  record     ${recordPath}`);
+  }
+  return { exit, plan, record };
+}
+
+function main(argv) {
+  let opts;
+  try {
+    opts = parseArgs(argv);
+  } catch (err) {
+    if (err instanceof UsageError) {
+      console.error(`dispatch: ${err.message}`);
+      console.error('usage: node dispatch/dispatch.mjs --repo <checkout> --issue <KEY> [--issue-file <path>] [--provider claude|codex|grok] [--dry-run]');
+      return 2;
+    }
+    throw err;
+  }
+  try {
+    return dispatch(opts).exit;
+  } catch (err) {
+    console.error(`dispatch: ${err.message}`);
+    return 2;
+  }
+}
+
+const invokedDirectly = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (invokedDirectly) process.exitCode = main(process.argv.slice(2));
