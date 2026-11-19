@@ -12,32 +12,42 @@ setting, a refused hook worked around, a step done by hand. Rob's own interventi
 
 | # | Issue | Worker model | Cycles | First-pass verdict | Interventions (what was changed or said) | What each became | PR |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | CMD-21 (project-cmd): harvest the engine from CrankMagic by script | claude-opus-5-5 (tier A asks claude-fable-5-2) | 5, then stopped at the turn cap (81 of 80) | Gate FAIL; evaluator not reached | 1. Dispatch never gave the evaluator the issue or the test results. Fixed before the run. 2. The tier A model needs a newer Claude Code than this machine has. Ran Opus 5.5. 3. The same gate failure looked new each cycle (test timings), so the same-failure cap never fired, in dispatch and in the Stop hook. 4. Dispatch does not push on a stop. Branch pushed and draft PR opened by hand. 5. Pending: the project's gate misreads a card's file name as a secret. Rob or the orchestrator decides who may change the gate. | 1. A test (`tests/dispatch.test.mjs`): the fake evaluator now refuses like the real one. 2. Nothing yet (follow-up A). 3. Two tests (`tests/dispatch.test.mjs`, `tests/hooks-stop.test.mjs`). 4. Nothing yet (follow-up B). 5. Pending Rob. | [project-cmd#15](https://github.com/CrankHub/project-cmd/pull/15) (draft, stopped) |
+| 1 | CMD-21 (project-cmd): harvest the engine from CrankMagic by script | claude-opus-5-5 (tier A asks claude-fable-5-2) | 7 in two attempts: 5 (stopped), then 2 | Gate FAIL (attempt 1). First evaluator verdict NEEDS_WORK, then PASS. | 1. Dispatch never gave the evaluator the issue or the test results. 2. The tier A model needs a newer Claude Code; ran Opus 5.5. 3. The same gate failure looked new each cycle (test timings), in dispatch and in the Stop hook. 4. Dispatch does not push on a stop; pushed and opened the PR by hand. 5. **Rob** widened CMD-21's Touches to the project's gate, so the worker could fix its secret scan. 6. A resumed run would have failed on the PR already open. 7. The evaluator's Touches check refused folders written as `engine/` and the worker's `for-rob/` file. 8. The PR body was 815 KB, over GitHub's limit; set by hand. | 1. A test. 2. Nothing yet (follow-up A). 3. Two tests. 4. Nothing yet (follow-up B). 5. A CI check: the worker's fix to the project's secret scan, which now also catches a key shape it missed. 6. A test. 7. Two tests. 8. A test. | [project-cmd#15](https://github.com/CrankHub/project-cmd/pull/15) (draft; evaluator PASS; Rob merges) |
 
-First-pass PASS rate so far: 0 of 1. Interventions so far: 5 (none by Rob yet). Fixed into rules: 2 of 5.
+First-pass PASS rate so far: 0 of 1. Interventions: 8, one by Rob. Turned into a rule: 6 of 8 (tests in this
+repository, plus one CI check in the project). Two are follow-ups (A, B).
 
-## Dispatch 1: CMD-21, Nov 18, 2026
+## Dispatch 1: CMD-21, Nov 18 and 19, 2026
 
 - **Command:** `node dispatch/dispatch.mjs --repo <project-cmd> --issue CMD-21 --issue-file <issue file> --provider claude --model claude-opus-5-5`,
-  after a `--dry-run` that printed the expected plan. The issue file was written from the Linear issue into the
-  run folder, outside both repositories.
-- **What the worker did:** the harvest script, the copy (about 13,000 files from one CrankMagic commit, with a
-  manifest), the two deck lists, the whole-game test and `for-rob/CMD-21.md`. All three tests pass. Cycle 1 took
-  10 minutes and 60 turns. The whole run took 14 minutes.
-- **Why it stopped:** step 4 of the project's gate, the secret scan, matches inside one card's file name, which the
-  manifest has to list. The gate is shared ground in that project: only an issue that names it in Touches may
-  change it. The worker would not edit it, drop the file from the manifest or disguise the name. It stopped and
+  after a `--dry-run` each time. The issue file was written from the Linear issue into the run folder, outside
+  both repositories.
+- **Attempt 1 (Nov 18, 14 minutes, 5 cycles, stopped at the turn cap):** the worker wrote the harvest script, the
+  copy (about 13,000 files from one CrankMagic commit, with a manifest), the two deck lists, the whole-game test
+  and `for-rob/CMD-21.md`. All three tests passed. The gate did not: its secret scan matched inside one card's
+  file name, which the manifest has to list. The gate is shared ground in that project, so the worker stopped and
   proposed the one-line fix. That was the right call.
+- **Rob's decision:** widen CMD-21's Touches to the gate, for the secret-scan pattern only.
+- **Attempt 2 (Nov 19, 33 minutes, 2 cycles):** the run resumed the same worktree. Cycle 1: the worker fixed the
+  pattern, the gate passed, and the evaluator said NEEDS_WORK because no test ran the harvest script itself
+  (running it twice, the refusals, a missing deck). Cycle 2: the worker added four fixture tests and fixed a bug
+  they found. The gate passed with 7 tests and the evaluator said PASS. The push worked. Updating the PR body
+  failed: see intervention 8.
 - **What the run showed about the harness:**
-  - The evaluator was never wired to its evidence. Caught by reading before the run, not by the run. It would
-    have stopped every dispatch.
-  - The same-failure cap is the cheap way out of a stuck run, and it did not work. Test output carries timings,
-    and both the dispatch and the Stop hook counted every timing change as a new failure. Cycles 2 to 5 were wasted.
+  - The evaluator earned its place. The gate was green, and it still found the script's own behavior untested.
+  - The evaluator, the dispatch and the hooks did not agree on what Touches means. Three seams, each fine alone,
+    each tested against fakes that agreed with themselves. Two of the three bugs were found by running the real
+    evaluator's check against the real branch before the second attempt. Rule: before a real run, run each part's
+    check against the real branch.
+  - The same-failure cap did not work: test output carries timings, and both the dispatch and the Stop hook counted
+    every timing change as a new failure. Cycles 2 to 5 of attempt 1 were wasted.
   - The worker had no way to say "I am blocked". It said so in plain words, and the dispatch ran it again four
     times (follow-up C).
+  - GitHub's error for an oversized PR body is "GraphQL: Something went wrong", which says nothing about size.
   - The hooks refused `handback/CMD-21.md`, a file that project's rules give to the worker (follow-up D).
   - A refusal also fired on the worker's own scratch file in the OS temp folder, written by a Bash `cat >` with a
     `/c/Users/...` path. The temp folder is meant to be writable (follow-up E).
+  - The evaluator ran on Claude, the same provider as the worker (follow-up F).
   - The project's own `.claude/settings.json` allow rules were ignored because the worktree folder was never
     trusted. Harmless here (the dispatch passes its own allowed tools). Worth knowing.
 
@@ -51,9 +61,9 @@ First-pass PASS rate so far: 0 of 1. Interventions so far: 5 (none by Rob yet). 
   PR with the stop reason in its body.
 - **C. A blocked signal.** A worker that cannot go on should be able to say so (a line in its progress file, or a
   marker file), and dispatch should stop at once instead of running it again.
-- **D. The worker's own files.** The hooks allow `PROGRESS.md`, `for-rob/**` and new tests outside Touches. A
-  project's hand-back file is the worker's too. Either the hooks read a list of the worker's own files from
-  `WORKFLOW.md`, or the issue template puts them in Touches.
+- **D. The worker's own files.** The hooks and the evaluator allow `PROGRESS.md`, `for-rob/**` and new tests
+  outside Touches. A project's hand-back file is the worker's too. Either both read a list of the worker's own
+  files from `WORKFLOW.md`, or the issue template puts them in Touches.
 - **E. Temp-folder writes from Bash.** Check the `outside-touches` rule against MSYS-style paths (`/c/Users/...`)
   under the OS temp folder.
 - **F. The evaluator's provider.** Dispatch runs the evaluator on the same provider as the worker. project-cmd's
