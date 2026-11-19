@@ -355,8 +355,32 @@ function hooksArgv(plan) {
   return [...plan.hooks.argv, '--worktree', plan.worktree, '--phase', 'implement', '--touches', plan.touches];
 }
 
+// The evaluator reads its evidence from <repo>/.harness/runs/<KEY>/ of the repo it is given, which
+// is the worktree: the issue comes by --issue-file, the gate output as test-results.txt there.
 function evaluatorArgv(plan) {
-  return [...plan.evaluator.argv, '--repo', plan.worktree, '--issue', plan.key, '--branch', plan.branch, '--provider', plan.provider];
+  const argv = [...plan.evaluator.argv, '--repo', plan.worktree, '--issue', plan.key, '--branch', plan.branch, '--provider', plan.provider];
+  if (plan.issue.source) argv.push('--issue-file', plan.issue.source);
+  return argv;
+}
+
+export function evaluatorEvidenceDir(plan) {
+  return join(plan.worktree, '.harness', 'runs', plan.key);
+}
+
+// What goes back to the worker after NEEDS_WORK: the unmet criteria, the remediation and the notes
+// (the evaluator's fields, evaluator/README.md), or summary and findings from an older evaluator.
+export function evaluationFeedback(evaluation) {
+  if (!evaluation || typeof evaluation !== 'object') return null;
+  const out = {};
+  if (Array.isArray(evaluation.criteria)) {
+    const unmet = evaluation.criteria.filter((c) => c && c.met === false);
+    if (unmet.length) out.unmet = unmet.map((c) => ({ id: c.id, text: c.text, evidence: c.evidence }));
+  }
+  if (Array.isArray(evaluation.remediation) && evaluation.remediation.length) out.remediation = evaluation.remediation;
+  if (evaluation.notes) out.notes = evaluation.notes;
+  if (evaluation.summary) out.summary = evaluation.summary;
+  if (evaluation.findings) out.findings = evaluation.findings;
+  return Object.keys(out).length ? JSON.stringify(out, null, 2) : null;
 }
 
 function prTitle(plan) {
@@ -665,6 +689,12 @@ export function dispatch(opts, { log = console.log } = {}) {
       // 6. The local gate.
       const g = run([bashPath(), '-c', plan.gate], { cwd: plan.worktree, timeout: Math.max(deadline - Date.now(), 1000) });
       writeFileSync(join(plan.runDir, `gate-${n}.txt`), g.out + g.err);
+      // The evaluator's test evidence: this cycle's gate output, where the evaluator looks for it.
+      mkdirSync(evaluatorEvidenceDir(plan), { recursive: true });
+      writeFileSync(
+        join(evaluatorEvidenceDir(plan), 'test-results.txt'),
+        `$ ${plan.gate}\n(cycle ${n}, the local gate, which runs the project's suites; exit ${g.code})\n\n${g.out}${g.err}`,
+      );
       cycle.gate = { exit: g.code, seconds: g.seconds };
       log(`  gate       cycle ${n}: exit ${g.code}`);
       save();
@@ -689,7 +719,7 @@ export function dispatch(opts, { log = console.log } = {}) {
         save();
         if (e.code === 2 || verdict === 'error') throw new StopError(`the evaluator failed (exit ${e.code}): ${tail(e.err || e.out, 5)}`);
         if (e.code === 1) {
-          const detail = evaluation ? JSON.stringify({ summary: evaluation.summary, findings: evaluation.findings }, null, 2) : tail(e.out + e.err);
+          const detail = evaluationFeedback(evaluation) ?? tail(e.out + e.err);
           failure = { sig: failureSignature('evaluator', detail), text: `The evaluator returned NEEDS_WORK:\n\n${detail}` };
         }
       }

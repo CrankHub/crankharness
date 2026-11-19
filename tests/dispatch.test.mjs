@@ -56,17 +56,32 @@ import { appendFileSync } from 'node:fs';
 appendFileSync(process.env.FAKE_HOOKS_LOG, JSON.stringify(process.argv.slice(2)) + '\\n');
 `;
 
+// Behaves like evaluator/evaluate.mjs at its seams: no issue text is exit 2; no test-results file
+// in <repo>/.harness/runs/<KEY>/ is NEEDS_WORK; the verdict is written in the real shape.
 const FAKE_EVALUATOR = `
 import { writeFileSync, mkdirSync, existsSync, readFileSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 const a = process.argv.slice(2);
-const arg = (n) => a[a.indexOf(n) + 1];
+const arg = (n) => (a.includes(n) ? a[a.indexOf(n) + 1] : undefined);
 appendFileSync(process.env.FAKE_EVAL_LOG, JSON.stringify(a) + '\\n');
 const runs = readFileSync(process.env.FAKE_EVAL_LOG, 'utf8').trim().split('\\n').length;
-const pass = process.env.FAKE_EVAL === 'pass' || (process.env.FAKE_EVAL === 'needs-work-once' && runs > 1);
 const dir = join(arg('--repo'), '.harness', 'runs', arg('--issue'));
+const issuePath = arg('--issue-file') || join(dir, 'issue.md');
+if (!existsSync(issuePath)) { console.error('no issue text: ' + issuePath + ' does not exist'); process.exit(2); }
+const results = join(dir, 'test-results.txt');
+const haveResults = existsSync(results) && /exit 0/.test(readFileSync(results, 'utf8'));
+const pass = haveResults && (process.env.FAKE_EVAL === 'pass' || (process.env.FAKE_EVAL === 'needs-work-once' && runs > 1));
 mkdirSync(dir, { recursive: true });
-writeFileSync(join(dir, 'evaluation.json'), JSON.stringify({ verdict: pass ? 'PASS' : 'NEEDS_WORK', summary: pass ? 'fine' : 'criterion 2 unproven', findings: pass ? [] : ['add a test for criterion 2'] }));
+writeFileSync(join(dir, 'evaluation.json'), JSON.stringify({
+  verdict: pass ? 'PASS' : 'NEEDS_WORK',
+  criteria: [
+    { id: 'AC1', text: 'the file says ok', met: true, evidence: 'result.txt' },
+    { id: 'AC2', text: 'criterion 2', met: pass, evidence: pass ? 'tested' : 'criterion 2 unproven' },
+    { id: 'test-results', text: 'the tests ran and passed', met: haveResults, evidence: haveResults ? 'test-results.txt' : 'no test-results file' },
+  ],
+  remediation: pass ? [] : ['add a test for criterion 2'],
+  notes: pass ? 'fine' : 'criterion 2 unproven',
+}));
 process.exit(pass ? 0 : 1);
 `;
 
@@ -378,11 +393,16 @@ test('with hooks and an evaluator: hooks get the Touches; NEEDS_WORK goes back t
   assert.equal(rec.first_pass_pass, false);
   const wt = join(s.repo, '.harness', 'worktrees', KEY);
   assert.deepEqual(lines(s.logs.hooks)[0], ['--worktree', wt, '--phase', 'implement', '--touches', 'result.txt,docs/**']);
-  assert.deepEqual(lines(s.logs.evaluator)[0], ['--repo', wt, '--issue', KEY, '--branch', BRANCH, '--provider', 'claude']);
+  assert.deepEqual(lines(s.logs.evaluator)[0], ['--repo', wt, '--issue', KEY, '--branch', BRANCH, '--provider', 'claude', '--issue-file', resolve(s.issueFile)]);
+  // The evaluator's evidence sits where it looks: the gate output as test-results.txt in the worktree's run folder.
+  assert.match(readFileSync(join(wt, '.harness', 'runs', KEY, 'test-results.txt'), 'utf8'), /exit 0/);
   const run = join(s.repo, '.harness', 'runs', KEY);
   assert.equal(JSON.parse(readFileSync(join(run, 'evaluation.json'), 'utf8')).verdict, 'NEEDS_WORK');
   assert.equal(JSON.parse(readFileSync(join(run, 'evaluation-2.json'), 'utf8')).verdict, 'PASS');
-  assert.match(readFileSync(join(run, 'prompt-2.md'), 'utf8'), /add a test for criterion 2/);
+  const prompt2 = readFileSync(join(run, 'prompt-2.md'), 'utf8');
+  assert.match(prompt2, /add a test for criterion 2/);
+  assert.match(prompt2, /"AC2"/); // the unmet criterion goes back to the worker, not just a summary
+  assert.doesNotMatch(prompt2, /"AC1"/); // met criteria do not
   rmSync(s.dir, { recursive: true, force: true });
 });
 
