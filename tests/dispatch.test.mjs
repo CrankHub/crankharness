@@ -37,6 +37,11 @@ if (mode === 'crash') { console.error('usage limit reached'); process.exit(3); }
 if (mode !== 'nothing') {
   const word = mode === 'always-bad' || (mode === 'bad-then-good' && cycle === 1) ? 'bad' : 'ok';
   writeFileSync('result.txt', word + '\\n');
+  if (mode === 'many') {
+    // A harvest-sized change: many files with long names (CMD-21 changed 13,089).
+    mkdirSync('docs/harvest', { recursive: true });
+    for (let i = 0; i < 3000; i += 1) writeFileSync('docs/harvest/a-card-with-a-rather-long-file-name-' + i + '.json', '{}\\n');
+  }
   if (mode !== 'leave') {
     execFileSync('git', ['add', '-A']);
     execFileSync('git', ['commit', '-q', '--allow-empty', '-m', '${KEY}: cycle ' + cycle]);
@@ -443,6 +448,18 @@ test('a branch that already has an open PR reuses it: its body is replaced, no s
   assert.equal(ghCalls(s.logs.gh, 'create').length, 0);
   const [edit] = ghCalls(s.logs.gh, 'edit');
   assert.deepEqual(edit.slice(0, 4), ['pr', 'edit', BRANCH, '--body-file']);
+  rmSync(s.dir, { recursive: true, force: true });
+});
+
+test('a change of thousands of files still gets a PR body GitHub accepts (CMD-21, dispatch 1)', () => {
+  const s = scratch();
+  const r = dispatch(s, [], { FAKE_MODE: 'many' });
+  assert.equal(r.code, 0, r.out);
+  const body = readFileSync(join(s.repo, '.harness', 'runs', KEY, 'pr-body.md'), 'utf8');
+  assert.ok(body.length < 65536, `the body is ${body.length} characters; GitHub's limit is 65,536`);
+  assert.match(body, /3001 files changed/); // the summary line survives the cap
+  assert.ok(body.split('\n').filter((l) => l.includes('a-card-with-a-rather-long-file-name')).length <= 40);
+  assert.doesNotMatch(body, /[A-Za-z]:[\\/]Users[\\/]|\/tmp\//); // no machine path in the body
   rmSync(s.dir, { recursive: true, force: true });
 });
 

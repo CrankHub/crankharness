@@ -535,10 +535,22 @@ export function failureSignature(kind, text) {
   return `${kind}:${sha256(norm).slice(0, 16)}`;
 }
 
+// GitHub refuses a PR body over 65,536 characters (with a bare "GraphQL: Something went wrong"). CMD-21
+// changed 13,089 files and its full --stat made an 815 KB body, so the stat and the log are capped and the
+// whole body is held under this limit. The full text stays in the run folder's diff.patch.
+export const PR_BODY_MAX = 60000;
+const STAT_FILES = 40;
+const LOG_LINES = 50;
+
+function capLines(text, n, what) {
+  const lines = String(text).split('\n');
+  return lines.length <= n ? text : [...lines.slice(0, n), `... and ${lines.length - n} more ${what}`].join('\n');
+}
+
 function prBody(plan, record) {
   const last = record.cycles[record.cycles.length - 1] || {};
-  const log = git(['log', '--oneline', '--no-merges', `${plan.base.ref}..HEAD`], plan.worktree).out.trim();
-  const stat = git(['diff', '--stat', plan.base.ref, 'HEAD'], plan.worktree).out.trim();
+  const log = capLines(git(['log', '--oneline', '--no-merges', `${plan.base.ref}..HEAD`], plan.worktree).out.trim(), LOG_LINES, 'commits');
+  const stat = git(['diff', '--stat=120', `--stat-count=${STAT_FILES}`, plan.base.ref, 'HEAD'], plan.worktree).out.trim();
   const verdict = last.evaluation?.verdict;
   const lines = [
     `Dispatched by CrankHarness (\`dispatch/dispatch.mjs\`, provider ${plan.provider}). Draft: it never merges itself.`,
@@ -574,10 +586,13 @@ function prBody(plan, record) {
     '',
     '## Run folder',
     '',
-    `\`${plan.runDir}\` on the machine that ran the dispatch (dispatch.json, prompt, worker output, gate output, evaluation, progress file).`,
+    `\`.harness/runs/${plan.key}/\` in the checkout on the machine that ran the dispatch (dispatch.json, prompt, worker output, gate output, evaluation, progress file, the full diff).`,
     `Cycles: ${record.cycles.length}. First-pass PASS: ${record.first_pass_pass === null ? 'unknown (evaluator pending)' : record.first_pass_pass}.`,
   );
-  return lines.join('\n');
+  const body = lines.join('\n');
+  if (body.length <= PR_BODY_MAX) return body;
+  const note = '\n\n(cut to fit GitHub\'s limit; the full diff is diff.patch in the run folder)';
+  return body.slice(0, PR_BODY_MAX - note.length) + note;
 }
 
 export function dispatch(opts, { log = console.log } = {}) {
