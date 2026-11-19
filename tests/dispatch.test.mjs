@@ -47,9 +47,18 @@ console.log(JSON.stringify({ type: 'result', result: 'did cycle ' + cycle, num_t
 
 const FAKE_GH = `
 import { appendFileSync } from 'node:fs';
-appendFileSync(process.env.FAKE_GH_LOG, JSON.stringify(process.argv.slice(2)) + '\\n');
+const a = process.argv.slice(2);
+appendFileSync(process.env.FAKE_GH_LOG, JSON.stringify(a) + '\\n');
+if (a[0] === 'pr' && a[1] === 'view') {
+  // No PR for the branch unless the test says one is open.
+  if (!process.env.FAKE_GH_OPEN_PR) { console.error('no pull requests found for branch'); process.exit(1); }
+  console.log(JSON.stringify({ url: process.env.FAKE_GH_OPEN_PR, state: 'OPEN' }));
+  process.exit(0);
+}
+if (a[0] === 'pr' && a[1] === 'edit') process.exit(0);
 console.log('https://github.com/CrankHub/example/pull/7');
 `;
+const ghCalls = (file, verb) => lines(file).filter((c) => c[0] === 'pr' && c[1] === verb);
 
 const FAKE_HOOKS = `
 import { appendFileSync } from 'node:fs';
@@ -315,8 +324,9 @@ test('one issue to one draft PR, with hooks and evaluator pending', () => {
   // The branch is on origin and carries the worker's commit.
   assert.match(git(s.origin, 'log', '--oneline', BRANCH), /TST-7: cycle 1/);
   // The draft PR was asked for with the key in the title.
-  const [gh] = lines(s.logs.gh);
+  const [gh] = ghCalls(s.logs.gh, 'create');
   assert.deepEqual(gh.slice(0, 7), ['pr', 'create', '--draft', '--base', 'main', '--head', BRANCH]);
+  assert.equal(r.record.pr.reused, false);
   assert.equal(gh[gh.indexOf('--title') + 1], 'TST-7: Write the result file');
   // The run folder.
   const run = join(s.repo, '.harness', 'runs', KEY);
@@ -420,6 +430,19 @@ test('with hooks and an evaluator: hooks get the Touches; NEEDS_WORK goes back t
   assert.match(prompt2, /add a test for criterion 2/);
   assert.match(prompt2, /"AC2"/); // the unmet criterion goes back to the worker, not just a summary
   assert.doesNotMatch(prompt2, /"AC1"/); // met criteria do not
+  rmSync(s.dir, { recursive: true, force: true });
+});
+
+test('a branch that already has an open PR reuses it: its body is replaced, no second PR (CMD-21, dispatch 1)', () => {
+  const s = scratch();
+  const open = 'https://github.com/CrankHub/example/pull/15';
+  const r = dispatch(s, [], { FAKE_GH_OPEN_PR: open });
+  assert.equal(r.code, 0, r.out);
+  assert.equal(r.record.pr.url, open);
+  assert.equal(r.record.pr.reused, true);
+  assert.equal(ghCalls(s.logs.gh, 'create').length, 0);
+  const [edit] = ghCalls(s.logs.gh, 'edit');
+  assert.deepEqual(edit.slice(0, 4), ['pr', 'edit', BRANCH, '--body-file']);
   rmSync(s.dir, { recursive: true, force: true });
 });
 

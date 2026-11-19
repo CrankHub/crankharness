@@ -753,11 +753,23 @@ export function dispatch(opts, { log = console.log } = {}) {
     log(`  push       origin ${plan.branch}`);
     const bodyFile = join(plan.runDir, 'pr-body.md');
     writeFileSync(bodyFile, prBody(plan, record));
-    const pr = run([...plan.gh, 'pr', 'create', '--draft', '--base', plan.base.branch, '--head', plan.branch, '--title', prTitle(plan), '--body-file', bodyFile], { cwd: plan.worktree });
+    // A resumed run reuses the branch's open PR (CMD-21, dispatch 1: the PR was opened on the stop,
+    // and a second "gh pr create" for the same branch fails). Its body is replaced with this run's.
+    const open = run([...plan.gh, 'pr', 'view', plan.branch, '--json', 'url,state'], { cwd: plan.worktree });
+    const existing = open.code === 0 ? readJson(open.out) : null;
+    let pr;
+    let reused = false;
+    if (existing && existing.state === 'OPEN' && existing.url) {
+      pr = run([...plan.gh, 'pr', 'edit', plan.branch, '--body-file', bodyFile], { cwd: plan.worktree });
+      if (pr.code === 0) pr.out = `${existing.url}\n`;
+      reused = true;
+    } else {
+      pr = run([...plan.gh, 'pr', 'create', '--draft', '--base', plan.base.branch, '--head', plan.branch, '--title', prTitle(plan), '--body-file', bodyFile], { cwd: plan.worktree });
+    }
     writeFileSync(join(plan.runDir, 'pr.txt'), pr.out + pr.err);
-    if (pr.code !== 0) throw new StopError(`gh pr create failed: ${tail(pr.err || pr.out, 5)}`);
+    if (pr.code !== 0) throw new StopError(`gh pr ${reused ? 'edit' : 'create'} failed: ${tail(pr.err || pr.out, 5)}`);
     const url = (pr.out.match(/https?:\/\/\S+/g) || []).pop() || pr.out.trim();
-    record.pr = { url, draft: true, title: prTitle(plan) };
+    record.pr = { url, draft: true, title: prTitle(plan), reused };
     record.final_state = 'draft-pr';
     record.next.push(`comment the PR link on ${plan.key}: ${url}`);
     log(`  draft PR   ${url}`);
