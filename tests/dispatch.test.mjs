@@ -12,7 +12,7 @@ import { join, resolve, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { slugify, branchName, touchesGlobs, readIssue, parseCommand, parseArgs, workerCommand } from '../dispatch/dispatch.mjs';
+import { slugify, branchName, touchesGlobs, readIssue, parseCommand, parseArgs, workerCommand, failureSignature } from '../dispatch/dispatch.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -204,6 +204,23 @@ test('readIssue takes the title, the labels and the Touches from the issue file'
   assert.deepEqual(issue.labels, ['Feature', 'agent-ready', 'size:S']);
   assert.deepEqual(issue.touches, ['result.txt', 'docs/']);
   rmSync(s.dir, { recursive: true, force: true });
+});
+
+test('the same failure is the same whatever the timings say (CMD-21, dispatch 1)', () => {
+  const run = (a, b, c) => [
+    '4. Secrets and personal addresses in text',
+    '  FAIL  possible secret:',
+    '        engine/HARVEST.json:59400:   "path": "game/engine/cards/u/urabrask-the-hidden.json",',
+    'ok 2 - Krenko Goblins against itself plays to a result',
+    `  duration_ms: ${a}`,
+    `# duration_ms ${b}`,
+    `took ${c}s, 12 ms per game`,
+    '# tests 3',
+    'FAIL',
+  ].join('\n');
+  assert.equal(failureSignature('gate', run('1108.2951', '2339.2793', '9.6')), failureSignature('gate', run('1284.5904', '2665.119', '10.5')));
+  // A different failure is still different.
+  assert.notEqual(failureSignature('gate', run('1', '2', '3')), failureSignature('gate', run('1', '2', '3').replace('# tests 3', '# tests 4')));
 });
 
 test('parseCommand takes a JSON array or words', () => {

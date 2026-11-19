@@ -521,9 +521,14 @@ function hasChanges(plan) {
   return git(['diff', '--quiet', plan.base.ref, 'HEAD'], plan.worktree).code !== 0;
 }
 
-function failureSignature(kind, text) {
+// Two failures are "the same" when they differ only in timings and hashes. Timings come in both
+// orders ("12 ms", "duration_ms: 3.04"), so any decimal number and any number after a duration key
+// is dropped (CMD-21, dispatch 1: TAP timings made five identical gate failures look different).
+export function failureSignature(kind, text) {
   const norm = String(text)
+    .replace(/\b(duration_ms|duration|elapsed|time)\b\s*[:=]?\s*\d+(\.\d+)?/gi, '$1')
     .replace(/\d+(\.\d+)?\s*(ms|s)\b/g, '')
+    .replace(/\d+\.\d+/g, '')
     .replace(/[0-9a-f]{7,40}/g, '')
     .replace(/\s+/g, ' ')
     .trim();
