@@ -12,7 +12,7 @@ import { join, resolve, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { slugify, branchName, touchesGlobs, readIssue, parseCommand, parseArgs, workerCommand } from '../dispatch/dispatch.mjs';
+import { slugify, branchName, touchesGlobs, readIssue, parseCommand, parseArgs, workerCommand, failureSignature } from '../dispatch/dispatch.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -37,6 +37,11 @@ if (mode === 'crash') { console.error('usage limit reached'); process.exit(3); }
 if (mode !== 'nothing') {
   const word = mode === 'always-bad' || (mode === 'bad-then-good' && cycle === 1) ? 'bad' : 'ok';
   writeFileSync('result.txt', word + '\\n');
+  if (mode === 'many') {
+    // A harvest-sized change: many files with long names (CMD-21 changed 13,089).
+    mkdirSync('docs/harvest', { recursive: true });
+    for (let i = 0; i < 3000; i += 1) writeFileSync('docs/harvest/a-card-with-a-rather-long-file-name-' + i + '.json', '{}\\n');
+  }
   if (mode !== 'leave') {
     execFileSync('git', ['add', '-A']);
     execFileSync('git', ['commit', '-q', '--allow-empty', '-m', '${KEY}: cycle ' + cycle]);
@@ -47,26 +52,50 @@ console.log(JSON.stringify({ type: 'result', result: 'did cycle ' + cycle, num_t
 
 const FAKE_GH = `
 import { appendFileSync } from 'node:fs';
-appendFileSync(process.env.FAKE_GH_LOG, JSON.stringify(process.argv.slice(2)) + '\\n');
+const a = process.argv.slice(2);
+appendFileSync(process.env.FAKE_GH_LOG, JSON.stringify(a) + '\\n');
+if (a[0] === 'pr' && a[1] === 'view') {
+  // No PR for the branch unless the test says one is open.
+  if (!process.env.FAKE_GH_OPEN_PR) { console.error('no pull requests found for branch'); process.exit(1); }
+  console.log(JSON.stringify({ url: process.env.FAKE_GH_OPEN_PR, state: 'OPEN' }));
+  process.exit(0);
+}
+if (a[0] === 'pr' && a[1] === 'edit') process.exit(0);
 console.log('https://github.com/CrankHub/example/pull/7');
 `;
+const ghCalls = (file, verb) => lines(file).filter((c) => c[0] === 'pr' && c[1] === verb);
 
 const FAKE_HOOKS = `
 import { appendFileSync } from 'node:fs';
 appendFileSync(process.env.FAKE_HOOKS_LOG, JSON.stringify(process.argv.slice(2)) + '\\n');
 `;
 
+// Behaves like evaluator/evaluate.mjs at its seams: no issue text is exit 2; no test-results file
+// in <repo>/.harness/runs/<KEY>/ is NEEDS_WORK; the verdict is written in the real shape.
 const FAKE_EVALUATOR = `
 import { writeFileSync, mkdirSync, existsSync, readFileSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 const a = process.argv.slice(2);
-const arg = (n) => a[a.indexOf(n) + 1];
+const arg = (n) => (a.includes(n) ? a[a.indexOf(n) + 1] : undefined);
 appendFileSync(process.env.FAKE_EVAL_LOG, JSON.stringify(a) + '\\n');
 const runs = readFileSync(process.env.FAKE_EVAL_LOG, 'utf8').trim().split('\\n').length;
-const pass = process.env.FAKE_EVAL === 'pass' || (process.env.FAKE_EVAL === 'needs-work-once' && runs > 1);
 const dir = join(arg('--repo'), '.harness', 'runs', arg('--issue'));
+const issuePath = arg('--issue-file') || join(dir, 'issue.md');
+if (!existsSync(issuePath)) { console.error('no issue text: ' + issuePath + ' does not exist'); process.exit(2); }
+const results = join(dir, 'test-results.txt');
+const haveResults = existsSync(results) && /exit 0/.test(readFileSync(results, 'utf8'));
+const pass = haveResults && (process.env.FAKE_EVAL === 'pass' || (process.env.FAKE_EVAL === 'needs-work-once' && runs > 1));
 mkdirSync(dir, { recursive: true });
-writeFileSync(join(dir, 'evaluation.json'), JSON.stringify({ verdict: pass ? 'PASS' : 'NEEDS_WORK', summary: pass ? 'fine' : 'criterion 2 unproven', findings: pass ? [] : ['add a test for criterion 2'] }));
+writeFileSync(join(dir, 'evaluation.json'), JSON.stringify({
+  verdict: pass ? 'PASS' : 'NEEDS_WORK',
+  criteria: [
+    { id: 'AC1', text: 'the file says ok', met: true, evidence: 'result.txt' },
+    { id: 'AC2', text: 'criterion 2', met: pass, evidence: pass ? 'tested' : 'criterion 2 unproven' },
+    { id: 'test-results', text: 'the tests ran and passed', met: haveResults, evidence: haveResults ? 'test-results.txt' : 'no test-results file' },
+  ],
+  remediation: pass ? [] : ['add a test for criterion 2'],
+  notes: pass ? 'fine' : 'criterion 2 unproven',
+}));
 process.exit(pass ? 0 : 1);
 `;
 
@@ -191,6 +220,23 @@ test('readIssue takes the title, the labels and the Touches from the issue file'
   rmSync(s.dir, { recursive: true, force: true });
 });
 
+test('the same failure is the same whatever the timings say (CMD-21, dispatch 1)', () => {
+  const run = (a, b, c) => [
+    '4. Secrets and personal addresses in text',
+    '  FAIL  possible secret:',
+    '        engine/HARVEST.json:59400:   "path": "game/engine/cards/u/urabrask-the-hidden.json",',
+    'ok 2 - Krenko Goblins against itself plays to a result',
+    `  duration_ms: ${a}`,
+    `# duration_ms ${b}`,
+    `took ${c}s, 12 ms per game`,
+    '# tests 3',
+    'FAIL',
+  ].join('\n');
+  assert.equal(failureSignature('gate', run('1108.2951', '2339.2793', '9.6')), failureSignature('gate', run('1284.5904', '2665.119', '10.5')));
+  // A different failure is still different.
+  assert.notEqual(failureSignature('gate', run('1', '2', '3')), failureSignature('gate', run('1', '2', '3').replace('# tests 3', '# tests 4')));
+});
+
 test('parseCommand takes a JSON array or words', () => {
   assert.deepEqual(parseCommand('["node", "a b.mjs"]'), ['node', 'a b.mjs']);
   assert.deepEqual(parseCommand('node "a b.mjs" --x'), ['node', 'a b.mjs', '--x']);
@@ -283,8 +329,9 @@ test('one issue to one draft PR, with hooks and evaluator pending', () => {
   // The branch is on origin and carries the worker's commit.
   assert.match(git(s.origin, 'log', '--oneline', BRANCH), /TST-7: cycle 1/);
   // The draft PR was asked for with the key in the title.
-  const [gh] = lines(s.logs.gh);
+  const [gh] = ghCalls(s.logs.gh, 'create');
   assert.deepEqual(gh.slice(0, 7), ['pr', 'create', '--draft', '--base', 'main', '--head', BRANCH]);
+  assert.equal(r.record.pr.reused, false);
   assert.equal(gh[gh.indexOf('--title') + 1], 'TST-7: Write the result file');
   // The run folder.
   const run = join(s.repo, '.harness', 'runs', KEY);
@@ -378,11 +425,41 @@ test('with hooks and an evaluator: hooks get the Touches; NEEDS_WORK goes back t
   assert.equal(rec.first_pass_pass, false);
   const wt = join(s.repo, '.harness', 'worktrees', KEY);
   assert.deepEqual(lines(s.logs.hooks)[0], ['--worktree', wt, '--phase', 'implement', '--touches', 'result.txt,docs/**']);
-  assert.deepEqual(lines(s.logs.evaluator)[0], ['--repo', wt, '--issue', KEY, '--branch', BRANCH, '--provider', 'claude']);
+  assert.deepEqual(lines(s.logs.evaluator)[0], ['--repo', wt, '--issue', KEY, '--branch', BRANCH, '--provider', 'claude', '--issue-file', resolve(s.issueFile)]);
+  // The evaluator's evidence sits where it looks: the gate output as test-results.txt in the worktree's run folder.
+  assert.match(readFileSync(join(wt, '.harness', 'runs', KEY, 'test-results.txt'), 'utf8'), /exit 0/);
   const run = join(s.repo, '.harness', 'runs', KEY);
   assert.equal(JSON.parse(readFileSync(join(run, 'evaluation.json'), 'utf8')).verdict, 'NEEDS_WORK');
   assert.equal(JSON.parse(readFileSync(join(run, 'evaluation-2.json'), 'utf8')).verdict, 'PASS');
-  assert.match(readFileSync(join(run, 'prompt-2.md'), 'utf8'), /add a test for criterion 2/);
+  const prompt2 = readFileSync(join(run, 'prompt-2.md'), 'utf8');
+  assert.match(prompt2, /add a test for criterion 2/);
+  assert.match(prompt2, /"AC2"/); // the unmet criterion goes back to the worker, not just a summary
+  assert.doesNotMatch(prompt2, /"AC1"/); // met criteria do not
+  rmSync(s.dir, { recursive: true, force: true });
+});
+
+test('a branch that already has an open PR reuses it: its body is replaced, no second PR (CMD-21, dispatch 1)', () => {
+  const s = scratch();
+  const open = 'https://github.com/CrankHub/example/pull/15';
+  const r = dispatch(s, [], { FAKE_GH_OPEN_PR: open });
+  assert.equal(r.code, 0, r.out);
+  assert.equal(r.record.pr.url, open);
+  assert.equal(r.record.pr.reused, true);
+  assert.equal(ghCalls(s.logs.gh, 'create').length, 0);
+  const [edit] = ghCalls(s.logs.gh, 'edit');
+  assert.deepEqual(edit.slice(0, 4), ['pr', 'edit', BRANCH, '--body-file']);
+  rmSync(s.dir, { recursive: true, force: true });
+});
+
+test('a change of thousands of files still gets a PR body GitHub accepts (CMD-21, dispatch 1)', () => {
+  const s = scratch();
+  const r = dispatch(s, [], { FAKE_MODE: 'many' });
+  assert.equal(r.code, 0, r.out);
+  const body = readFileSync(join(s.repo, '.harness', 'runs', KEY, 'pr-body.md'), 'utf8');
+  assert.ok(body.length < 65536, `the body is ${body.length} characters; GitHub's limit is 65,536`);
+  assert.match(body, /3001 files changed/); // the summary line survives the cap
+  assert.ok(body.split('\n').filter((l) => l.includes('a-card-with-a-rather-long-file-name')).length <= 40);
+  assert.doesNotMatch(body, /[A-Za-z]:[\\/]Users[\\/]|\/tmp\//); // no machine path in the body
   rmSync(s.dir, { recursive: true, force: true });
 });
 

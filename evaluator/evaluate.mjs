@@ -163,7 +163,8 @@ export function touchPaths(item) {
 }
 
 export function globToRegExp(glob) {
-  const g = glob.replace(/^\.\//, '').replace(/\/\.\.\.$/, '/**');
+  // "engine/" is the folder, as dispatch and the hooks read it (CMD-21, dispatch 1).
+  const g = glob.replace(/^\.\//, '').replace(/\/\.\.\.$/, '/**').replace(/(.)\/$/, '$1/**');
   let re = '';
   for (let i = 0; i < g.length; i++) {
     const c = g[i];
@@ -183,6 +184,29 @@ export function globToRegExp(glob) {
 export function outsideTouches(files, touches) {
   const patterns = touches.map(globToRegExp);
   return files.filter((f) => !patterns.some((p) => p.test(f)));
+}
+
+// The files a worker may write outside its Touches are the hooks' (hooks/rules.json, scope.outside_touches):
+// always PROGRESS.md and for-rob/**, and new test files. The evaluator reads the same list, so the fence and
+// the judge agree (CMD-21, dispatch 1: the hooks allowed for-rob/CMD-21.md and this check would have refused it).
+const DEFAULT_ALLOWED = { always: ['PROGRESS.md', 'for-rob/**'], newTests: ['**/*.test.*', '**/*.spec.*', 'tests/**', 'test/**', '**/__tests__/**'] };
+
+export function allowedOutsideTouches(rulesPath = join(HERE, '..', 'hooks', 'rules.json')) {
+  try {
+    const scope = JSON.parse(readFileSync(rulesPath, 'utf8')).scope?.outside_touches;
+    if (scope) return { always: scope.always_writable || [], newTests: scope.new_tests || [] };
+  } catch {
+    // No hooks here: the defaults, which are the hooks' own.
+  }
+  return DEFAULT_ALLOWED;
+}
+
+// changed: [{ status, path }] from git diff --name-status. A new test file is allowed; an edited one is not.
+export function outsideTouchesAllowing(changed, touches, allowed = allowedOutsideTouches()) {
+  const always = allowed.always.map(globToRegExp);
+  const tests = allowed.newTests.map(globToRegExp);
+  const rest = changed.filter((c) => !always.some((p) => p.test(c.path)) && !(c.status === 'A' && tests.some((p) => p.test(c.path))));
+  return outsideTouches(rest.map((c) => c.path), touches);
 }
 
 // --- reading the branch, through git objects only ---------------------------------------------------------------
@@ -321,7 +345,7 @@ export function evaluate({ repo, issue, branch, provider = 'claude', issueFile, 
     };
   }
   if (touches.length) {
-    const outside = outsideTouches(changed.map((c) => c.path), touches);
+    const outside = outsideTouchesAllowing(changed, touches);
     fixed.touches = outside.length
       ? {
           met: false,

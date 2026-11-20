@@ -59,6 +59,17 @@ describe('the gate fails: the stop is refused with the diagnostics', () => {
     assert.equal(lastLog(env).result, 'handoff');
   });
 
+  test('the same failure with different test timings is still the same failure (CMD-21, dispatch 1)', () => {
+    const env = setup({ gateLocal: 'echo "  duration_ms: $RANDOM.$RANDOM"; test ! -e BROKEN' });
+    writeFileSync(join(env.root, 'src', 'app.js'), 'two\n');
+    writeFileSync(join(env.root, 'BROKEN'), '');
+    assert.equal(stop(env).status, 2);
+    assert.equal(stop(env, { stop_hook_active: true }).status, 2);
+    const third = stop(env, { stop_hook_active: true });
+    assert.equal(third.status, 0, third.stderr);
+    assert.match(state(env).handoff.why, /same way 3 times/);
+  });
+
   test('caps.cycles different failures: the stop is allowed', () => {
     const env = setup({ gateLocal: 'cat BROKEN; exit 1', cycles: 2 });
     writeFileSync(join(env.root, 'src', 'app.js'), 'two\n');

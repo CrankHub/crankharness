@@ -355,8 +355,32 @@ function hooksArgv(plan) {
   return [...plan.hooks.argv, '--worktree', plan.worktree, '--phase', 'implement', '--touches', plan.touches];
 }
 
+// The evaluator reads its evidence from <repo>/.harness/runs/<KEY>/ of the repo it is given, which
+// is the worktree: the issue comes by --issue-file, the gate output as test-results.txt there.
 function evaluatorArgv(plan) {
-  return [...plan.evaluator.argv, '--repo', plan.worktree, '--issue', plan.key, '--branch', plan.branch, '--provider', plan.provider];
+  const argv = [...plan.evaluator.argv, '--repo', plan.worktree, '--issue', plan.key, '--branch', plan.branch, '--provider', plan.provider];
+  if (plan.issue.source) argv.push('--issue-file', plan.issue.source);
+  return argv;
+}
+
+export function evaluatorEvidenceDir(plan) {
+  return join(plan.worktree, '.harness', 'runs', plan.key);
+}
+
+// What goes back to the worker after NEEDS_WORK: the unmet criteria, the remediation and the notes
+// (the evaluator's fields, evaluator/README.md), or summary and findings from an older evaluator.
+export function evaluationFeedback(evaluation) {
+  if (!evaluation || typeof evaluation !== 'object') return null;
+  const out = {};
+  if (Array.isArray(evaluation.criteria)) {
+    const unmet = evaluation.criteria.filter((c) => c && c.met === false);
+    if (unmet.length) out.unmet = unmet.map((c) => ({ id: c.id, text: c.text, evidence: c.evidence }));
+  }
+  if (Array.isArray(evaluation.remediation) && evaluation.remediation.length) out.remediation = evaluation.remediation;
+  if (evaluation.notes) out.notes = evaluation.notes;
+  if (evaluation.summary) out.summary = evaluation.summary;
+  if (evaluation.findings) out.findings = evaluation.findings;
+  return Object.keys(out).length ? JSON.stringify(out, null, 2) : null;
 }
 
 function prTitle(plan) {
@@ -497,19 +521,36 @@ function hasChanges(plan) {
   return git(['diff', '--quiet', plan.base.ref, 'HEAD'], plan.worktree).code !== 0;
 }
 
-function failureSignature(kind, text) {
+// Two failures are "the same" when they differ only in timings and hashes. Timings come in both
+// orders ("12 ms", "duration_ms: 3.04"), so any decimal number and any number after a duration key
+// is dropped (CMD-21, dispatch 1: TAP timings made five identical gate failures look different).
+export function failureSignature(kind, text) {
   const norm = String(text)
+    .replace(/\b(duration_ms|duration|elapsed|time)\b\s*[:=]?\s*\d+(\.\d+)?/gi, '$1')
     .replace(/\d+(\.\d+)?\s*(ms|s)\b/g, '')
+    .replace(/\d+\.\d+/g, '')
     .replace(/[0-9a-f]{7,40}/g, '')
     .replace(/\s+/g, ' ')
     .trim();
   return `${kind}:${sha256(norm).slice(0, 16)}`;
 }
 
+// GitHub refuses a PR body over 65,536 characters (with a bare "GraphQL: Something went wrong"). CMD-21
+// changed 13,089 files and its full --stat made an 815 KB body, so the stat and the log are capped and the
+// whole body is held under this limit. The full text stays in the run folder's diff.patch.
+export const PR_BODY_MAX = 60000;
+const STAT_FILES = 40;
+const LOG_LINES = 50;
+
+function capLines(text, n, what) {
+  const lines = String(text).split('\n');
+  return lines.length <= n ? text : [...lines.slice(0, n), `... and ${lines.length - n} more ${what}`].join('\n');
+}
+
 function prBody(plan, record) {
   const last = record.cycles[record.cycles.length - 1] || {};
-  const log = git(['log', '--oneline', '--no-merges', `${plan.base.ref}..HEAD`], plan.worktree).out.trim();
-  const stat = git(['diff', '--stat', plan.base.ref, 'HEAD'], plan.worktree).out.trim();
+  const log = capLines(git(['log', '--oneline', '--no-merges', `${plan.base.ref}..HEAD`], plan.worktree).out.trim(), LOG_LINES, 'commits');
+  const stat = git(['diff', '--stat=120', `--stat-count=${STAT_FILES}`, plan.base.ref, 'HEAD'], plan.worktree).out.trim();
   const verdict = last.evaluation?.verdict;
   const lines = [
     `Dispatched by CrankHarness (\`dispatch/dispatch.mjs\`, provider ${plan.provider}). Draft: it never merges itself.`,
@@ -545,10 +586,13 @@ function prBody(plan, record) {
     '',
     '## Run folder',
     '',
-    `\`${plan.runDir}\` on the machine that ran the dispatch (dispatch.json, prompt, worker output, gate output, evaluation, progress file).`,
+    `\`.harness/runs/${plan.key}/\` in the checkout on the machine that ran the dispatch (dispatch.json, prompt, worker output, gate output, evaluation, progress file, the full diff).`,
     `Cycles: ${record.cycles.length}. First-pass PASS: ${record.first_pass_pass === null ? 'unknown (evaluator pending)' : record.first_pass_pass}.`,
   );
-  return lines.join('\n');
+  const body = lines.join('\n');
+  if (body.length <= PR_BODY_MAX) return body;
+  const note = '\n\n(cut to fit GitHub\'s limit; the full diff is diff.patch in the run folder)';
+  return body.slice(0, PR_BODY_MAX - note.length) + note;
 }
 
 export function dispatch(opts, { log = console.log } = {}) {
@@ -665,6 +709,12 @@ export function dispatch(opts, { log = console.log } = {}) {
       // 6. The local gate.
       const g = run([bashPath(), '-c', plan.gate], { cwd: plan.worktree, timeout: Math.max(deadline - Date.now(), 1000) });
       writeFileSync(join(plan.runDir, `gate-${n}.txt`), g.out + g.err);
+      // The evaluator's test evidence: this cycle's gate output, where the evaluator looks for it.
+      mkdirSync(evaluatorEvidenceDir(plan), { recursive: true });
+      writeFileSync(
+        join(evaluatorEvidenceDir(plan), 'test-results.txt'),
+        `$ ${plan.gate}\n(cycle ${n}, the local gate, which runs the project's suites; exit ${g.code})\n\n${g.out}${g.err}`,
+      );
       cycle.gate = { exit: g.code, seconds: g.seconds };
       log(`  gate       cycle ${n}: exit ${g.code}`);
       save();
@@ -689,7 +739,7 @@ export function dispatch(opts, { log = console.log } = {}) {
         save();
         if (e.code === 2 || verdict === 'error') throw new StopError(`the evaluator failed (exit ${e.code}): ${tail(e.err || e.out, 5)}`);
         if (e.code === 1) {
-          const detail = evaluation ? JSON.stringify({ summary: evaluation.summary, findings: evaluation.findings }, null, 2) : tail(e.out + e.err);
+          const detail = evaluationFeedback(evaluation) ?? tail(e.out + e.err);
           failure = { sig: failureSignature('evaluator', detail), text: `The evaluator returned NEEDS_WORK:\n\n${detail}` };
         }
       }
@@ -718,11 +768,23 @@ export function dispatch(opts, { log = console.log } = {}) {
     log(`  push       origin ${plan.branch}`);
     const bodyFile = join(plan.runDir, 'pr-body.md');
     writeFileSync(bodyFile, prBody(plan, record));
-    const pr = run([...plan.gh, 'pr', 'create', '--draft', '--base', plan.base.branch, '--head', plan.branch, '--title', prTitle(plan), '--body-file', bodyFile], { cwd: plan.worktree });
+    // A resumed run reuses the branch's open PR (CMD-21, dispatch 1: the PR was opened on the stop,
+    // and a second "gh pr create" for the same branch fails). Its body is replaced with this run's.
+    const open = run([...plan.gh, 'pr', 'view', plan.branch, '--json', 'url,state'], { cwd: plan.worktree });
+    const existing = open.code === 0 ? readJson(open.out) : null;
+    let pr;
+    let reused = false;
+    if (existing && existing.state === 'OPEN' && existing.url) {
+      pr = run([...plan.gh, 'pr', 'edit', plan.branch, '--body-file', bodyFile], { cwd: plan.worktree });
+      if (pr.code === 0) pr.out = `${existing.url}\n`;
+      reused = true;
+    } else {
+      pr = run([...plan.gh, 'pr', 'create', '--draft', '--base', plan.base.branch, '--head', plan.branch, '--title', prTitle(plan), '--body-file', bodyFile], { cwd: plan.worktree });
+    }
     writeFileSync(join(plan.runDir, 'pr.txt'), pr.out + pr.err);
-    if (pr.code !== 0) throw new StopError(`gh pr create failed: ${tail(pr.err || pr.out, 5)}`);
+    if (pr.code !== 0) throw new StopError(`gh pr ${reused ? 'edit' : 'create'} failed: ${tail(pr.err || pr.out, 5)}`);
     const url = (pr.out.match(/https?:\/\/\S+/g) || []).pop() || pr.out.trim();
-    record.pr = { url, draft: true, title: prTitle(plan) };
+    record.pr = { url, draft: true, title: prTitle(plan), reused };
     record.final_state = 'draft-pr';
     record.next.push(`comment the PR link on ${plan.key}: ${url}`);
     log(`  draft PR   ${url}`);

@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { decide, extractJson, globToRegExp, outsideTouches, parseIssue, touchPaths } from '../evaluator/evaluate.mjs';
+import { allowedOutsideTouches, decide, extractJson, globToRegExp, outsideTouches, outsideTouchesAllowing, parseIssue, touchPaths } from '../evaluator/evaluate.mjs';
 
 const EVALUATE = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'evaluator', 'evaluate.mjs');
 
@@ -336,8 +336,26 @@ test('globs: ** spans folders, * stays in one, a plain path covers what is under
   assert.ok(!globToRegExp('src/*.js').test('src/a/b.js'));
   assert.ok(globToRegExp('src').test('src/a/b.js'));
   assert.ok(globToRegExp('src/...').test('src/a/b.js'));
+  // A trailing slash is the folder, as in an issue's Touches line "`engine/`" (CMD-21, dispatch 1).
+  assert.ok(globToRegExp('engine/').test('engine/game/engine/aims.mjs'));
+  assert.ok(globToRegExp('engine/').test('engine/HARVEST.json'));
+  assert.ok(!globToRegExp('engine/').test('engines/x.mjs'));
   assert.ok(!globToRegExp('README.md').test('README.mdx'));
   assert.deepEqual(outsideTouches(['evaluator/x.mjs', 'README.md', 'package.json'], ['evaluator/**', 'README.md']), ['package.json']);
+});
+
+test('the Touches check allows what the hooks allow: for-rob/**, PROGRESS.md, new test files (CMD-21, dispatch 1)', () => {
+  const allowed = allowedOutsideTouches();
+  assert.ok(allowed.always.includes('for-rob/**'), 'read from hooks/rules.json');
+  const changed = [
+    { status: 'A', path: 'tools/harvest' },
+    { status: 'A', path: 'for-rob/CMD-21.md' },
+    { status: 'M', path: 'PROGRESS.md' },
+    { status: 'A', path: 'tests/foundation/whole-game.test.mjs' },
+    { status: 'M', path: 'tests/old.test.mjs' }, // an edited test is not new: still outside
+    { status: 'M', path: 'AGENTS.md' },
+  ];
+  assert.deepEqual(outsideTouchesAllowing(changed, ['tools/harvest'], allowed), ['tests/old.test.mjs', 'AGENTS.md']);
 });
 
 test('extractJson finds the last fenced JSON block, or a bare object', () => {

@@ -20,6 +20,7 @@ This repository holds everything that is **not** project-specific. What a projec
 | [`evaluator/`](evaluator/README.md) | the fresh-context evaluator (ROB-406): `node evaluator/evaluate.mjs --repo <path> --issue <KEY> --branch <name>` judges a branch against its issue with a read-only worker and writes PASS or NEEDS_WORK to `.harness/runs/<KEY>/evaluation.json` |
 | [`hooks/`](hooks/README.md) | the fence around a headless worker: deny rules per phase in `hooks/rules.json`, a Stop hook that runs the gate, and `node hooks/install.mjs --worktree <path> --phase <phase> [--touches <globs>]` (ROB-405) |
 | [`risk.md`](risk.md) | the default risk list (what is high), what a flag does and never does, and how an agent proposes a change in `PROGRESS.md` |
+| [`PROGRESS.md`](PROGRESS.md) | the ten measured dispatches (ROB-407): one row per dispatch with its model, cycles, first-pass verdict, the interventions and what each became |
 | [`COMPLETION.md`](COMPLETION.md) | what finished means: Rob's requirements of Nov 14, 2026, the issue that delivers each, the stages, and the order |
 | [`ORCHESTRATOR.md`](ORCHESTRATOR.md) | the one orchestrator per project: its loop, validating a task, carrying a change through, assigning work, the merge queue |
 | [`PROVIDERS.md`](PROVIDERS.md) | Claude, Codex and Grok through one adapter interface; model tiers; who evaluates whom; what is not yet known about each tool |

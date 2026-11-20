@@ -130,8 +130,15 @@ function snapshot(config, owned) {
   }
 }
 
-function signature(command, code, output) {
-  const norm = output.replace(/\d+(\.\d+)?\s*(ms|s|seconds?)\b/g, '').replace(/[0-9a-f]{7,40}/g, '').slice(-2000);
+// Timings come in both orders ("12 ms", "duration_ms: 3.04"); both are dropped, as are decimal
+// numbers and hashes, so the same failure is counted as the same (CMD-21, dispatch 1).
+export function signature(command, code, output) {
+  const norm = output
+    .replace(/\b(duration_ms|duration|elapsed|time)\b\s*[:=]?\s*\d+(\.\d+)?/gi, '$1')
+    .replace(/\d+(\.\d+)?\s*(ms|s|seconds?)\b/g, '')
+    .replace(/\d+\.\d+/g, '')
+    .replace(/[0-9a-f]{7,40}/g, '')
+    .slice(-2000);
   return createHash('sha1').update(`${command}\n${code}\n${norm}`).digest('hex').slice(0, 12);
 }
 
