@@ -309,6 +309,8 @@ export function evaluate({ repo, issue, branch, provider = 'claude', issueFile, 
   if (!repo || !issue || !branch) throw new EvaluatorError('--repo, --issue and --branch are required');
   repo = resolve(repo);
   if (!/^[A-Za-z][A-Za-z0-9]*-\d+$/.test(issue)) throw new EvaluatorError(`not an issue key: ${issue}`);
+  // A project may name Codex by its family, "gpt" (project-cmd's WORKFLOW.md and labels).
+  if (provider === 'gpt' || provider === 'openai') provider = 'codex';
   if (!runWorker && !PROVIDERS[provider]) {
     throw new EvaluatorError(`unknown provider: ${provider} (one of ${Object.keys(PROVIDERS).join(', ')})`);
   }

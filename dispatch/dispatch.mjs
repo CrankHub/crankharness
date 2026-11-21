@@ -30,6 +30,16 @@ import { checkContract, parseFrontMatter } from '../check-contract.mjs';
 
 export const HARNESS_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 export const PROVIDERS = ['claude', 'codex', 'grok'];
+// Projects name a provider by its family: project-cmd's labels and WORKFLOW.md say "gpt" for what the
+// harness runs as the Codex CLI (ROB-407, dispatch 2: "--provider gpt" was refused).
+export const PROVIDER_ALIASES = { gpt: 'codex', openai: 'codex' };
+// Providers the evaluator can run today (evaluator/evaluate.mjs); grok waits on ROB-403.
+export const EVALUATOR_PROVIDERS = ['claude', 'codex'];
+
+export function canonicalProvider(name) {
+  const n = String(name || '').toLowerCase();
+  return PROVIDER_ALIASES[n] ?? n;
+}
 // What a claude worker may use without asking. The hooks (ROB-405) are the guard on what Bash
 // may do and which files may be written; this list only keeps the session headless.
 export const CLAUDE_TOOLS = ['Read', 'Edit', 'Write', 'Glob', 'Grep', 'Bash'];
@@ -47,6 +57,7 @@ export function parseArgs(argv) {
     '--issue': 'issue',
     '--issue-file': 'issueFile',
     '--provider': 'provider',
+    '--evaluator': 'evaluator',
     '--model': 'model',
     '--worker-cmd': 'workerCmd',
     '--gh-cmd': 'ghCmd',
@@ -66,7 +77,15 @@ export function parseArgs(argv) {
   if (!opts.repo) throw new UsageError('--repo <checkout> is required');
   if (!opts.issue) throw new UsageError('--issue <KEY> is required');
   if (!/^[A-Z][A-Z0-9]*-\d+$/.test(opts.issue)) throw new UsageError(`--issue ${opts.issue} is not an issue key like CMD-21`);
-  if (!PROVIDERS.includes(opts.provider)) throw new UsageError(`--provider ${opts.provider}: one of ${PROVIDERS.join(', ')}`);
+  opts.providerAsNamed = opts.provider;
+  opts.provider = canonicalProvider(opts.provider);
+  if (!PROVIDERS.includes(opts.provider)) {
+    throw new UsageError(`--provider ${opts.providerAsNamed}: one of ${PROVIDERS.join(', ')} (or ${Object.keys(PROVIDER_ALIASES).join(', ')} for codex)`);
+  }
+  if (opts.evaluator !== undefined) {
+    opts.evaluator = canonicalProvider(opts.evaluator);
+    if (!EVALUATOR_PROVIDERS.includes(opts.evaluator)) throw new UsageError(`--evaluator ${opts.evaluator}: one of ${EVALUATOR_PROVIDERS.join(', ')}`);
+  }
   opts.workerCmd ??= process.env.CRANKHARNESS_WORKER_CMD;
   opts.ghCmd ??= process.env.CRANKHARNESS_GH_CMD;
   return opts;
@@ -175,6 +194,98 @@ export function workerCommand(provider, { override, model } = {}) {
   };
 }
 
+// check-contract's front-matter reader keeps YAML flow values ({a: [b, c]}) as text. This reads
+// them: maps, lists and plain scalars, which is all WORKFLOW.md uses.
+export function parseFlow(value) {
+  if (typeof value !== 'string') return value;
+  const s = value.trim();
+  if (!s.startsWith('{') && !s.startsWith('[')) return value;
+  let i = 0;
+  const ws = () => { while (i < s.length && /\s/.test(s[i])) i += 1; };
+  const scalar = () => {
+    const start = i;
+    while (i < s.length && !',:]}'.includes(s[i])) i += 1;
+    return s.slice(start, i).trim().replace(/^['"]|['"]$/g, '');
+  };
+  const node = () => {
+    ws();
+    if (s[i] === '[') {
+      i += 1;
+      const out = [];
+      ws();
+      while (i < s.length && s[i] !== ']') { out.push(node()); ws(); if (s[i] === ',') i += 1; ws(); }
+      i += 1;
+      return out;
+    }
+    if (s[i] === '{') {
+      i += 1;
+      const out = {};
+      ws();
+      while (i < s.length && s[i] !== '}') {
+        const k = scalar();
+        ws();
+        if (s[i] === ':') i += 1;
+        out[k] = node();
+        ws();
+        if (s[i] === ',') i += 1;
+        ws();
+      }
+      i += 1;
+      return out;
+    }
+    return scalar();
+  };
+  try {
+    return node();
+  } catch {
+    return value;
+  }
+}
+
+// Who judges the worker's change: the first provider in WORKFLOW.md's providers.evaluate list for the
+// worker's provider that the evaluator can run and that is not the worker's own. Otherwise the worker's
+// own provider, said so in the record. --evaluator overrides. (ROB-407, dispatch 1, follow-up F.)
+export function chooseEvaluator({ providers, worker, workerAsNamed, override }) {
+  if (override) return { provider: override, why: 'given with --evaluator' };
+  const lists = parseFlow(providers?.evaluate) || {};
+  const key = [workerAsNamed, worker, worker === 'codex' ? 'gpt' : null].find((k) => k && lists[k]);
+  const list = key ? parseFlow(lists[key]) : [];
+  for (const name of Array.isArray(list) ? list : []) {
+    const p = canonicalProvider(name);
+    if (EVALUATOR_PROVIDERS.includes(p) && p !== worker) return { provider: p, why: `WORKFLOW.md providers.evaluate.${key}` };
+  }
+  const own = EVALUATOR_PROVIDERS.includes(worker) ? worker : 'claude';
+  return { provider: own, why: key ? `no runnable provider in WORKFLOW.md providers.evaluate.${key} other than the worker's` : 'WORKFLOW.md names no evaluator: the worker\'s own provider' };
+}
+
+// What a worker reported. claude -p prints one JSON object; codex exec --json prints events, one per
+// line: the last agent_message is its summary, and turn.completed carries the usage.
+export function readWorkerOutput(provider, out) {
+  if (provider === 'codex') {
+    const events = String(out).split(/\r?\n/).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+    if (!events.length) return {};
+    const items = events.filter((e) => e.type === 'item.completed' && e.item);
+    const messages = items.filter((e) => e.item.type === 'agent_message' && typeof e.item.text === 'string');
+    const usage = events.filter((e) => e.type === 'turn.completed' && e.usage).map((e) => e.usage);
+    const result = {
+      turns: usage.length,
+      steps: items.length,
+      session_id: events.find((e) => e.type === 'thread.started')?.thread_id,
+    };
+    if (usage.length) result.usage = usage.reduce((a, u) => { for (const [k, v] of Object.entries(u)) if (typeof v === 'number') a[k] = (a[k] || 0) + v; return a; }, {});
+    if (messages.length) result.summary = messages[messages.length - 1].item.text;
+    return result;
+  }
+  const json = readJson(out);
+  if (!json || typeof json !== 'object') return {};
+  return {
+    turns: Number.isInteger(json.num_turns) ? json.num_turns : undefined,
+    usage: json.usage,
+    session_id: json.session_id,
+    summary: typeof json.result === 'string' ? json.result : undefined,
+  };
+}
+
 // --- running things ----------------------------------------------------------------------------
 
 function quoteWin(a) {
@@ -273,7 +384,7 @@ export function makePlan(opts) {
   const key = opts.issue;
   const refusals = [];
   const notes = [];
-  const plan = { repo, key, provider: opts.provider, dryRun: opts.dryRun, refusals, notes };
+  const plan = { repo, key, provider: opts.provider, providerAsNamed: opts.providerAsNamed ?? opts.provider, dryRun: opts.dryRun, refusals, notes };
 
   if (!existsSync(repo) || !statSync(repo).isDirectory()) {
     refusals.push(`${repo} is not a directory`);
@@ -301,6 +412,7 @@ export function makePlan(opts) {
         branch_pattern: wf.branch?.pattern,
         gate: wf.gate?.local,
         touches_default: wf.touches?.default,
+        providers: wf.providers,
         caps: {
           cycles: wf.caps?.cycles ?? 8,
           same_failure: wf.caps?.same_failure ?? 3,
@@ -344,8 +456,11 @@ export function makePlan(opts) {
   plan.hooks = optionalCommand('hooks/install.mjs');
   plan.evaluator = optionalCommand('evaluator/evaluate.mjs');
   plan.worker = workerCommand(opts.provider, { override: opts.workerCmd, model: opts.model });
+  plan.judge = chooseEvaluator({ providers: plan.workflow.providers, worker: opts.provider, workerAsNamed: plan.providerAsNamed, override: opts.evaluator });
   if (plan.worker.pending) refusals.push(plan.worker.pending);
-  if (opts.provider === 'codex' && !opts.workerCmd) notes.push('codex worker: the command is wired but not yet run for real (ROB-403, the Codex login)');
+  if (opts.provider === 'codex' && !opts.workerCmd) {
+    notes.push('codex worker: the hooks are Claude Code settings and do not fence it; its workspace-write sandbox, the gate and the evaluator\'s Touches check do');
+  }
   plan.gh = opts.ghCmd ? parseCommand(opts.ghCmd) : ['gh'];
   if (!plan.base.hasOrigin) notes.push('no origin remote: the branch starts from the local main, and push and the PR will stop the run');
   return plan;
@@ -358,7 +473,7 @@ function hooksArgv(plan) {
 // The evaluator reads its evidence from <repo>/.harness/runs/<KEY>/ of the repo it is given, which
 // is the worktree: the issue comes by --issue-file, the gate output as test-results.txt there.
 function evaluatorArgv(plan) {
-  const argv = [...plan.evaluator.argv, '--repo', plan.worktree, '--issue', plan.key, '--branch', plan.branch, '--provider', plan.provider];
+  const argv = [...plan.evaluator.argv, '--repo', plan.worktree, '--issue', plan.key, '--branch', plan.branch, '--provider', plan.judge.provider];
   if (plan.issue.source) argv.push('--issue-file', plan.issue.source);
   return argv;
 }
@@ -417,6 +532,7 @@ export function renderPlan(plan) {
     out.push(`    2 worker     ${plan.worker.argv ? `${show(plan.worker.argv)}  (prompt on stdin, cwd = the worktree)` : plan.worker.pending}`);
     out.push(`    3 gate       bash -c ${JSON.stringify(plan.gate)}  (cwd = the worktree)`);
     out.push(`    4 evaluator  ${plan.evaluator.present ? show(evaluatorArgv(plan)) : 'evaluator pending (evaluator/evaluate.mjs not here yet: ROB-406)'}`);
+    out.push(`      judged by ${plan.judge.provider} (${plan.judge.why})`);
     out.push(`      on a gate failure or NEEDS_WORK the worker runs again with the failure, up to ${plan.workflow.caps.cycles} cycles`);
     out.push(`    5 push       git push -u origin ${plan.branch}`);
     out.push(`    6 draft PR   ${show(plan.gh)} pr create --draft --base ${plan.base.branch} --head ${plan.branch} --title ${JSON.stringify(prTitle(plan))}`);
@@ -570,13 +686,17 @@ function prBody(plan, record) {
     '',
     `- Local gate: \`${plan.gate}\` exited ${last.gate?.exit} in the worktree (cycle ${last.n}).`,
     plan.evaluator.present
-      ? `- Evaluator: \`evaluator/evaluate.mjs --issue ${plan.key} --branch ${plan.branch}\` returned ${verdict ?? 'no verdict'} (exit ${last.evaluation?.exit}).`
+      ? `- Evaluator: \`evaluator/evaluate.mjs --issue ${plan.key} --branch ${plan.branch}\` returned ${verdict ?? 'no verdict'} (exit ${last.evaluation?.exit}), judged by ${plan.judge.provider}.`
       : '- Evaluator: not yet provable (evaluator pending, ROB-406).',
     `- Contract: \`check-contract.mjs\` ${plan.contract.pass ? 'PASS' : 'FAIL'} before the run.`,
     '',
     '## Assumed, not proven',
     '',
-    plan.hooks.present ? '- The hooks were installed for the implement phase.' : '- The hooks did not guard this run (hooks pending, ROB-405).',
+    !plan.hooks.present
+      ? '- The hooks did not guard this run (hooks pending, ROB-405).'
+      : plan.provider === 'claude'
+        ? '- The hooks were installed for the implement phase.'
+        : `- The hooks were installed, but they are Claude Code settings: the ${plan.provider} worker ran inside its own sandbox, not the hooks.`,
     '- Everything in the issue-level definition of done that no gate above proves (`dod/issue.md`, "Which lines each phase can prove").',
     '',
     '## Outstanding',
@@ -613,7 +733,10 @@ export function dispatch(opts, { log = console.log } = {}) {
     issue: plan.key,
     title: plan.issue.title,
     provider: plan.provider,
+    provider_as_named: plan.providerAsNamed,
     worker: plan.worker.via,
+    evaluator_provider: plan.judge.provider,
+    evaluator_provider_why: plan.judge.why,
     repo: plan.repo,
     worktree: plan.worktree,
     branch: plan.branch,
@@ -688,14 +811,13 @@ export function dispatch(opts, { log = console.log } = {}) {
       });
       writeFileSync(join(plan.runDir, `worker-${n}.out.json`), w.out);
       if (w.err.trim()) writeFileSync(join(plan.runDir, `worker-${n}.err.txt`), w.err);
-      const json = readJson(w.out);
+      const reported = readWorkerOutput(plan.worker.via === 'injected' ? 'claude' : plan.provider, w.out);
       cycle.worker = { exit: w.code, seconds: w.seconds };
-      if (json && typeof json === 'object') {
-        if (Number.isInteger(json.num_turns)) cycle.worker.turns = json.num_turns;
-        if (json.usage) cycle.worker.usage = json.usage;
-        if (json.session_id) cycle.worker.session_id = json.session_id;
-        if (typeof json.result === 'string') record.worker_summary = json.result.slice(0, 2000);
-      }
+      if (Number.isInteger(reported.turns)) cycle.worker.turns = reported.turns;
+      if (Number.isInteger(reported.steps)) cycle.worker.steps = reported.steps;
+      if (reported.usage) cycle.worker.usage = reported.usage;
+      if (reported.session_id) cycle.worker.session_id = reported.session_id;
+      if (reported.summary) record.worker_summary = reported.summary.slice(0, 2000);
       record.turns += cycle.worker.turns ?? 0;
       const progress = join(plan.worktree, '.harness', 'PROGRESS.md');
       if (existsSync(progress)) copyFileSync(progress, join(plan.runDir, 'PROGRESS.md'));

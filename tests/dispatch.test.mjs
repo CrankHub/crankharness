@@ -12,7 +12,7 @@ import { join, resolve, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { slugify, branchName, touchesGlobs, readIssue, parseCommand, parseArgs, workerCommand, failureSignature } from '../dispatch/dispatch.mjs';
+import { slugify, branchName, touchesGlobs, readIssue, parseCommand, parseArgs, workerCommand, failureSignature, parseFlow, chooseEvaluator, readWorkerOutput } from '../dispatch/dispatch.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -244,9 +244,60 @@ test('parseCommand takes a JSON array or words', () => {
 
 test('parseArgs refuses a bad key, an unknown provider and a missing repo', () => {
   assert.throws(() => parseArgs(['--repo', '.', '--issue', 'cmd21']), /not an issue key/);
-  assert.throws(() => parseArgs(['--repo', '.', '--issue', 'CMD-21', '--provider', 'gpt']), /one of/);
+  assert.throws(() => parseArgs(['--repo', '.', '--issue', 'CMD-21', '--provider', 'gemini']), /one of/);
+  assert.throws(() => parseArgs(['--repo', '.', '--issue', 'CMD-21', '--evaluator', 'grok']), /--evaluator grok/);
   assert.throws(() => parseArgs(['--issue', 'CMD-21']), /--repo/);
   assert.equal(parseArgs(['--repo', '.', '--issue', 'CMD-21', '--dry-run']).dryRun, true);
+});
+
+test('"gpt", the name a project uses, runs the Codex worker (ROB-407, dispatch 2)', () => {
+  const o = parseArgs(['--repo', '.', '--issue', 'CMD-62', '--provider', 'gpt']);
+  assert.equal(o.provider, 'codex');
+  assert.equal(o.providerAsNamed, 'gpt');
+  assert.equal(parseArgs(['--repo', '.', '--issue', 'CMD-62', '--evaluator', 'gpt']).evaluator, 'codex');
+});
+
+test('parseFlow reads the YAML flow values WORKFLOW.md uses', () => {
+  assert.deepEqual(parseFlow('{claude: [gpt, grok], gpt: [claude, grok]}'), { claude: ['gpt', 'grok'], gpt: ['claude', 'grok'] });
+  assert.deepEqual(parseFlow('{share: 1, tiers: {A: claude-fable-5-2, B: unset}}'), { share: '1', tiers: { A: 'claude-fable-5-2', B: 'unset' } });
+  assert.equal(parseFlow('plain'), 'plain');
+});
+
+test('the evaluator is another provider when WORKFLOW.md names one (follow-up F)', () => {
+  const providers = { evaluate: '{claude: [gpt, grok], gpt: [claude, grok], grok: [gpt, claude]}' };
+  assert.equal(chooseEvaluator({ providers, worker: 'codex', workerAsNamed: 'gpt' }).provider, 'claude');
+  assert.equal(chooseEvaluator({ providers, worker: 'claude', workerAsNamed: 'claude' }).provider, 'codex');
+  assert.equal(chooseEvaluator({ providers, worker: 'grok', workerAsNamed: 'grok' }).provider, 'codex');
+  // Named under the harness's own name, too.
+  assert.equal(chooseEvaluator({ providers, worker: 'codex', workerAsNamed: 'codex' }).provider, 'claude');
+  // Nothing named: the worker's own provider, and the record says why.
+  const own = chooseEvaluator({ providers: undefined, worker: 'claude', workerAsNamed: 'claude' });
+  assert.equal(own.provider, 'claude');
+  assert.match(own.why, /names no evaluator/);
+  // Only grok listed (not runnable yet): the worker's own.
+  assert.equal(chooseEvaluator({ providers: { evaluate: '{claude: [grok]}' }, worker: 'claude', workerAsNamed: 'claude' }).provider, 'claude');
+  assert.equal(chooseEvaluator({ providers, worker: 'claude', workerAsNamed: 'claude', override: 'claude' }).provider, 'claude');
+});
+
+test('readWorkerOutput reads codex exec --json events and claude -p JSON', () => {
+  const codex = [
+    '{"type":"thread.started","thread_id":"t-1"}',
+    '{"type":"turn.started"}',
+    '{"type":"item.completed","item":{"id":"item_0","type":"command_execution","command":"ls"}}',
+    '{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"first"}}',
+    '{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"done: three candidates"}}',
+    '{"type":"turn.completed","usage":{"input_tokens":100,"output_tokens":5}}',
+  ].join('\n');
+  const c = readWorkerOutput('codex', codex);
+  assert.equal(c.summary, 'done: three candidates');
+  assert.equal(c.turns, 1);
+  assert.equal(c.steps, 3);
+  assert.equal(c.session_id, 't-1');
+  assert.deepEqual(c.usage, { input_tokens: 100, output_tokens: 5 });
+  const cl = readWorkerOutput('claude', JSON.stringify({ result: 'ok', num_turns: 4, session_id: 's' }));
+  assert.equal(cl.summary, 'ok');
+  assert.equal(cl.turns, 4);
+  assert.deepEqual(readWorkerOutput('codex', 'not json'), {});
 });
 
 test('the worker seam: claude -p first, codex exec behind it, grok pending', () => {
