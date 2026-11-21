@@ -322,6 +322,13 @@ test('parseIssue reads the acceptance criteria and the Touches paths', () => {
   assert.deepEqual(touches, ['src/**', 'tests/greet.test.js']);
 });
 
+test('parseIssue reads Touches written as one line of paths, not only as a list (ROB-407, dispatches 1 and 2)', () => {
+  const md = '# X-1: t\n\n## Acceptance criteria\n\n- one\n\n## Touches\n\n`tools/harvest`, `engine/`, `decks/harvested/`\n\n## Out of scope\n\nNothing.\n';
+  assert.deepEqual(parseIssue(md).touches, ['tools/harvest', 'engine/', 'decks/harvested/']);
+  // A list still wins, and its labels are not paths.
+  assert.deepEqual(parseIssue('## Touches\n\n- `docs/look/` (edit)\n').touches, ['docs/look/']);
+});
+
 test('touchPaths takes backticked paths, or the first word that is not a label', () => {
   assert.deepEqual(touchPaths('CrankHarness: `evaluator/**` (new)'), ['evaluator/**']);
   assert.deepEqual(touchPaths('src/app.js (edit)'), ['src/app.js']);
