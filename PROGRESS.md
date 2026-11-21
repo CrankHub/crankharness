@@ -13,11 +13,10 @@ setting, a refused hook worked around, a step done by hand. Rob's own interventi
 | # | Issue | Worker model | Cycles | First-pass verdict | Interventions (what was changed or said) | What each became | PR |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | 1 | CMD-21 (project-cmd): harvest the engine from CrankMagic by script | claude-opus-5-5 (tier A asks claude-fable-5-2) | 7 in two attempts: 5 (stopped), then 2 | Gate FAIL (attempt 1). First evaluator verdict NEEDS_WORK, then PASS. | 1. Dispatch never gave the evaluator the issue or the test results. 2. The tier A model needs a newer Claude Code; ran Opus 5.5. 3. The same gate failure looked new each cycle (test timings), in dispatch and in the Stop hook. 4. Dispatch does not push on a stop; pushed and opened the PR by hand. 5. **Rob** widened CMD-21's Touches to the project's gate, so the worker could fix its secret scan. 6. A resumed run would have failed on the PR already open. 7. The evaluator's Touches check refused folders written as `engine/` and the worker's `for-rob/` file. 8. The PR body was 815 KB, over GitHub's limit; set by hand. | 1. A test. 2. Nothing yet (follow-up A). 3. Two tests. 4. Nothing yet (follow-up B). 5. A CI check: the worker's fix to the project's secret scan, which now also catches a key shape it missed. 6. A test. 7. Two tests. 8. A test. | [project-cmd#15](https://github.com/CrankHub/project-cmd/pull/15) (merged Nov 20) |
-| 2 | CMD-62 (project-cmd): three candidate looks for the world, one chosen | Codex, gpt-6.1-sol (its config default; the project's GPT tiers are unset). Judged by Claude. | 1 | PASS as run. NEEDS_WORK on a recheck with the Touches check working (see below). | 1. `--provider gpt` was refused: the project says gpt, the harness said codex. 2. The evaluator would have judged Codex's work with Codex; the project asks for Claude. 3. The dispatch could not read Codex's output (no summary, turns or usage). 4. Main moved during the run (CMD-33 merged), and the PR body showed CMD-33's files as deleted here. Body corrected by hand. 5. The evaluator's Touches check had silently never run, in this dispatch or in dispatch 1: it read Touches only as a list, and both issues write it on one line. Fixed, and the evaluator run again by hand. | 1. A test. 2. A test (closes follow-up F). 3. A test. 4. A test. 5. A test. | [project-cmd#31](https://github.com/CrankHub/project-cmd/pull/31) (draft; Rob merges) |
+| 2 | CMD-62 (project-cmd): three candidate looks for the world, one chosen | Codex, gpt-6.1-sol (its config default; the project's GPT tiers are unset). Judged by Claude. | 1 | NEEDS_WORK (Rob, Nov 21: the recheck counts). The run's own PASS came from an evaluator whose Touches check was not running. | 1. `--provider gpt` was refused: the project says gpt, the harness said codex. 2. The evaluator would have judged Codex's work with Codex; the project asks for Claude. 3. The dispatch could not read Codex's output (no summary, turns or usage). 4. Main moved during the run (CMD-33 merged), and the PR body showed CMD-33's files as deleted here. Body corrected by hand. 5. The evaluator's Touches check had silently never run, in this dispatch or in dispatch 1: it read Touches only as a list, and both issues write it on one line. Fixed, and the evaluator run again by hand. | 1. A test. 2. A test (closes follow-up F). 3. A test. 4. A test. 5. A test. | [project-cmd#31](https://github.com/CrankHub/project-cmd/pull/31) (draft; Rob merges) |
 
-First-pass PASS rate so far: 1 of 2 as run (dispatch 2), or 0 of 2 if dispatch 2's recheck counts. Interventions:
-13, one by Rob. Turned into a rule: 11 of 13 (tests in this repository, plus one CI check in the project). Two
-are follow-ups (A, B).
+First-pass PASS rate so far: 0 of 2. Interventions: 13, one by Rob. Turned into a rule: 11 of 13 (tests in this
+repository, plus one CI check in the project). Two are follow-ups (A, B).
 
 ## Dispatch 1: CMD-21, Nov 18 and 19, 2026
 
@@ -65,6 +64,8 @@ are follow-ups (A, B).
   and `handback/CMD-62.md`. Its sandbox refused its own `git commit` (the worktree's git folder is outside the
   sandbox), so the dispatch committed the files. The gate passed, Claude's evaluator said PASS, and the draft PR
   opened.
+- **The verdict:** NEEDS_WORK. Rob ruled on Nov 21 that the recheck counts, because the run's own PASS came from
+  an evaluator whose Touches check was not running.
 - **The recheck:** after the run, I found that the evaluator's Touches check had never run, in either dispatch.
   For dispatch 1 it would have found nothing: its branch was checked by hand before the second attempt. Run again
   on CMD-62 with the check working, the evaluator said NEEDS_WORK on two points:
