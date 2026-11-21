@@ -150,7 +150,11 @@ function listItems(lines) {
 export function parseIssue(markdown) {
   const parsed = sections(markdown);
   const criteria = listItems(section(parsed, 'Acceptance criteria')).map((text, i) => ({ id: `AC${i + 1}`, text }));
-  const touches = listItems(section(parsed, 'Touches')).flatMap(touchPaths);
+  // Touches as a list (templates/issue.md) or as one line of `paths` (as many Linear issues write it,
+  // CMD-21's among them). Read only as a list, the check silently did not run in ROB-407 dispatches 1 and 2.
+  const touchLines = section(parsed, 'Touches') || [];
+  let touches = listItems(touchLines).flatMap(touchPaths);
+  if (touches.length === 0) touches = touchLines.flatMap((l) => [...l.matchAll(/`([^`]+)`/g)].map((m) => m[1].trim()));
   return { criteria, touches };
 }
 

@@ -634,7 +634,7 @@ function commitLeftovers(plan) {
 }
 
 function hasChanges(plan) {
-  return git(['diff', '--quiet', plan.base.ref, 'HEAD'], plan.worktree).code !== 0;
+  return git(['diff', '--quiet', `${plan.base.ref}...HEAD`], plan.worktree).code !== 0;
 }
 
 // Two failures are "the same" when they differ only in timings and hashes. Timings come in both
@@ -666,7 +666,9 @@ function capLines(text, n, what) {
 function prBody(plan, record) {
   const last = record.cycles[record.cycles.length - 1] || {};
   const log = capLines(git(['log', '--oneline', '--no-merges', `${plan.base.ref}..HEAD`], plan.worktree).out.trim(), LOG_LINES, 'commits');
-  const stat = git(['diff', '--stat=120', `--stat-count=${STAT_FILES}`, plan.base.ref, 'HEAD'], plan.worktree).out.trim();
+  // Three dots: what the branch changes since it left main. Main moves during a run (CMD-62, dispatch 2:
+  // CMD-33 merged meanwhile, and a two-dot stat showed its files as deleted by this branch).
+  const stat = git(['diff', '--stat=120', `--stat-count=${STAT_FILES}`, `${plan.base.ref}...HEAD`], plan.worktree).out.trim();
   const verdict = last.evaluation?.verdict;
   const lines = [
     `Dispatched by CrankHarness (\`dispatch/dispatch.mjs\`, provider ${plan.provider}). Draft: it never merges itself.`,
@@ -928,7 +930,7 @@ export function dispatch(opts, { log = console.log } = {}) {
     record.finished_at = new Date().toISOString();
     record.wall_seconds = Math.round((Date.now() - started) / 1000);
     if (existsSync(join(plan.worktree, '.git'))) {
-      const d = git(['diff', plan.base.ref, 'HEAD'], plan.worktree);
+      const d = git(['diff', `${plan.base.ref}...HEAD`], plan.worktree);
       if (d.code === 0) writeFileSync(join(plan.runDir, 'diff.patch'), d.out);
     }
     save();

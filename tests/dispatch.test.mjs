@@ -37,6 +37,19 @@ if (mode === 'crash') { console.error('usage limit reached'); process.exit(3); }
 if (mode !== 'nothing') {
   const word = mode === 'always-bad' || (mode === 'bad-then-good' && cycle === 1) ? 'bad' : 'ok';
   writeFileSync('result.txt', word + '\\n');
+  if (mode === 'main-moves' && cycle === 1) {
+    // Another issue merges into main while this worker runs (CMD-62, dispatch 2: CMD-33 did).
+    const g = (args, opts = {}) => execFileSync('git', args, { encoding: 'utf8', ...opts }).trim();
+    const base = g(['rev-parse', 'origin/main']);
+    const env = { ...process.env, GIT_INDEX_FILE: '.harness/other.index' };
+    g(['read-tree', base], { env });
+    const blob = g(['hash-object', '-w', '--stdin'], { input: 'merged elsewhere\\n' });
+    g(['update-index', '--add', '--cacheinfo', '100644,' + blob + ',other-issue.txt'], { env });
+    const tree = g(['write-tree'], { env });
+    const commit = g(['commit-tree', tree, '-p', base, '-m', 'another issue merged'], { env });
+    g(['push', '-q', 'origin', commit + ':refs/heads/main']);
+    g(['fetch', '-q', 'origin']);
+  }
   if (mode === 'many') {
     // A harvest-sized change: many files with long names (CMD-21 changed 13,089).
     mkdirSync('docs/harvest', { recursive: true });
@@ -511,6 +524,18 @@ test('a change of thousands of files still gets a PR body GitHub accepts (CMD-21
   assert.match(body, /3001 files changed/); // the summary line survives the cap
   assert.ok(body.split('\n').filter((l) => l.includes('a-card-with-a-rather-long-file-name')).length <= 40);
   assert.doesNotMatch(body, /[A-Za-z]:[\\/]Users[\\/]|\/tmp\//); // no machine path in the body
+  rmSync(s.dir, { recursive: true, force: true });
+});
+
+test('when main moves during the run, the PR body and diff show only this branch\'s change (CMD-62, dispatch 2)', () => {
+  const s = scratch();
+  const r = dispatch(s, [], { FAKE_MODE: 'main-moves' });
+  assert.equal(r.code, 0, r.out);
+  const run = join(s.repo, '.harness', 'runs', KEY);
+  const body = readFileSync(join(run, 'pr-body.md'), 'utf8');
+  assert.match(body, /result\.txt/);
+  assert.doesNotMatch(body, /other-issue\.txt/);
+  assert.doesNotMatch(readFileSync(join(run, 'diff.patch'), 'utf8'), /other-issue\.txt/);
   rmSync(s.dir, { recursive: true, force: true });
 });
 
