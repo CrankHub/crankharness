@@ -150,7 +150,11 @@ function listItems(lines) {
 export function parseIssue(markdown) {
   const parsed = sections(markdown);
   const criteria = listItems(section(parsed, 'Acceptance criteria')).map((text, i) => ({ id: `AC${i + 1}`, text }));
-  const touches = listItems(section(parsed, 'Touches')).flatMap(touchPaths);
+  // Touches as a list (templates/issue.md) or as one line of `paths` (as many Linear issues write it,
+  // CMD-21's among them). Read only as a list, the check silently did not run in ROB-407 dispatches 1 and 2.
+  const touchLines = section(parsed, 'Touches') || [];
+  let touches = listItems(touchLines).flatMap(touchPaths);
+  if (touches.length === 0) touches = touchLines.flatMap((l) => [...l.matchAll(/`([^`]+)`/g)].map((m) => m[1].trim()));
   return { criteria, touches };
 }
 
@@ -309,6 +313,8 @@ export function evaluate({ repo, issue, branch, provider = 'claude', issueFile, 
   if (!repo || !issue || !branch) throw new EvaluatorError('--repo, --issue and --branch are required');
   repo = resolve(repo);
   if (!/^[A-Za-z][A-Za-z0-9]*-\d+$/.test(issue)) throw new EvaluatorError(`not an issue key: ${issue}`);
+  // A project may name Codex by its family, "gpt" (project-cmd's WORKFLOW.md and labels).
+  if (provider === 'gpt' || provider === 'openai') provider = 'codex';
   if (!runWorker && !PROVIDERS[provider]) {
     throw new EvaluatorError(`unknown provider: ${provider} (one of ${Object.keys(PROVIDERS).join(', ')})`);
   }

@@ -12,7 +12,7 @@ import { join, resolve, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { slugify, branchName, touchesGlobs, readIssue, parseCommand, parseArgs, workerCommand, failureSignature } from '../dispatch/dispatch.mjs';
+import { slugify, branchName, touchesGlobs, readIssue, parseCommand, parseArgs, workerCommand, failureSignature, parseFlow, chooseEvaluator, readWorkerOutput } from '../dispatch/dispatch.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -37,6 +37,19 @@ if (mode === 'crash') { console.error('usage limit reached'); process.exit(3); }
 if (mode !== 'nothing') {
   const word = mode === 'always-bad' || (mode === 'bad-then-good' && cycle === 1) ? 'bad' : 'ok';
   writeFileSync('result.txt', word + '\\n');
+  if (mode === 'main-moves' && cycle === 1) {
+    // Another issue merges into main while this worker runs (CMD-62, dispatch 2: CMD-33 did).
+    const g = (args, opts = {}) => execFileSync('git', args, { encoding: 'utf8', ...opts }).trim();
+    const base = g(['rev-parse', 'origin/main']);
+    const env = { ...process.env, GIT_INDEX_FILE: '.harness/other.index' };
+    g(['read-tree', base], { env });
+    const blob = g(['hash-object', '-w', '--stdin'], { input: 'merged elsewhere\\n' });
+    g(['update-index', '--add', '--cacheinfo', '100644,' + blob + ',other-issue.txt'], { env });
+    const tree = g(['write-tree'], { env });
+    const commit = g(['commit-tree', tree, '-p', base, '-m', 'another issue merged'], { env });
+    g(['push', '-q', 'origin', commit + ':refs/heads/main']);
+    g(['fetch', '-q', 'origin']);
+  }
   if (mode === 'many') {
     // A harvest-sized change: many files with long names (CMD-21 changed 13,089).
     mkdirSync('docs/harvest', { recursive: true });
@@ -244,9 +257,60 @@ test('parseCommand takes a JSON array or words', () => {
 
 test('parseArgs refuses a bad key, an unknown provider and a missing repo', () => {
   assert.throws(() => parseArgs(['--repo', '.', '--issue', 'cmd21']), /not an issue key/);
-  assert.throws(() => parseArgs(['--repo', '.', '--issue', 'CMD-21', '--provider', 'gpt']), /one of/);
+  assert.throws(() => parseArgs(['--repo', '.', '--issue', 'CMD-21', '--provider', 'gemini']), /one of/);
+  assert.throws(() => parseArgs(['--repo', '.', '--issue', 'CMD-21', '--evaluator', 'grok']), /--evaluator grok/);
   assert.throws(() => parseArgs(['--issue', 'CMD-21']), /--repo/);
   assert.equal(parseArgs(['--repo', '.', '--issue', 'CMD-21', '--dry-run']).dryRun, true);
+});
+
+test('"gpt", the name a project uses, runs the Codex worker (ROB-407, dispatch 2)', () => {
+  const o = parseArgs(['--repo', '.', '--issue', 'CMD-62', '--provider', 'gpt']);
+  assert.equal(o.provider, 'codex');
+  assert.equal(o.providerAsNamed, 'gpt');
+  assert.equal(parseArgs(['--repo', '.', '--issue', 'CMD-62', '--evaluator', 'gpt']).evaluator, 'codex');
+});
+
+test('parseFlow reads the YAML flow values WORKFLOW.md uses', () => {
+  assert.deepEqual(parseFlow('{claude: [gpt, grok], gpt: [claude, grok]}'), { claude: ['gpt', 'grok'], gpt: ['claude', 'grok'] });
+  assert.deepEqual(parseFlow('{share: 1, tiers: {A: claude-fable-5-2, B: unset}}'), { share: '1', tiers: { A: 'claude-fable-5-2', B: 'unset' } });
+  assert.equal(parseFlow('plain'), 'plain');
+});
+
+test('the evaluator is another provider when WORKFLOW.md names one (follow-up F)', () => {
+  const providers = { evaluate: '{claude: [gpt, grok], gpt: [claude, grok], grok: [gpt, claude]}' };
+  assert.equal(chooseEvaluator({ providers, worker: 'codex', workerAsNamed: 'gpt' }).provider, 'claude');
+  assert.equal(chooseEvaluator({ providers, worker: 'claude', workerAsNamed: 'claude' }).provider, 'codex');
+  assert.equal(chooseEvaluator({ providers, worker: 'grok', workerAsNamed: 'grok' }).provider, 'codex');
+  // Named under the harness's own name, too.
+  assert.equal(chooseEvaluator({ providers, worker: 'codex', workerAsNamed: 'codex' }).provider, 'claude');
+  // Nothing named: the worker's own provider, and the record says why.
+  const own = chooseEvaluator({ providers: undefined, worker: 'claude', workerAsNamed: 'claude' });
+  assert.equal(own.provider, 'claude');
+  assert.match(own.why, /names no evaluator/);
+  // Only grok listed (not runnable yet): the worker's own.
+  assert.equal(chooseEvaluator({ providers: { evaluate: '{claude: [grok]}' }, worker: 'claude', workerAsNamed: 'claude' }).provider, 'claude');
+  assert.equal(chooseEvaluator({ providers, worker: 'claude', workerAsNamed: 'claude', override: 'claude' }).provider, 'claude');
+});
+
+test('readWorkerOutput reads codex exec --json events and claude -p JSON', () => {
+  const codex = [
+    '{"type":"thread.started","thread_id":"t-1"}',
+    '{"type":"turn.started"}',
+    '{"type":"item.completed","item":{"id":"item_0","type":"command_execution","command":"ls"}}',
+    '{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"first"}}',
+    '{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"done: three candidates"}}',
+    '{"type":"turn.completed","usage":{"input_tokens":100,"output_tokens":5}}',
+  ].join('\n');
+  const c = readWorkerOutput('codex', codex);
+  assert.equal(c.summary, 'done: three candidates');
+  assert.equal(c.turns, 1);
+  assert.equal(c.steps, 3);
+  assert.equal(c.session_id, 't-1');
+  assert.deepEqual(c.usage, { input_tokens: 100, output_tokens: 5 });
+  const cl = readWorkerOutput('claude', JSON.stringify({ result: 'ok', num_turns: 4, session_id: 's' }));
+  assert.equal(cl.summary, 'ok');
+  assert.equal(cl.turns, 4);
+  assert.deepEqual(readWorkerOutput('codex', 'not json'), {});
 });
 
 test('the worker seam: claude -p first, codex exec behind it, grok pending', () => {
@@ -460,6 +524,18 @@ test('a change of thousands of files still gets a PR body GitHub accepts (CMD-21
   assert.match(body, /3001 files changed/); // the summary line survives the cap
   assert.ok(body.split('\n').filter((l) => l.includes('a-card-with-a-rather-long-file-name')).length <= 40);
   assert.doesNotMatch(body, /[A-Za-z]:[\\/]Users[\\/]|\/tmp\//); // no machine path in the body
+  rmSync(s.dir, { recursive: true, force: true });
+});
+
+test('when main moves during the run, the PR body and diff show only this branch\'s change (CMD-62, dispatch 2)', () => {
+  const s = scratch();
+  const r = dispatch(s, [], { FAKE_MODE: 'main-moves' });
+  assert.equal(r.code, 0, r.out);
+  const run = join(s.repo, '.harness', 'runs', KEY);
+  const body = readFileSync(join(run, 'pr-body.md'), 'utf8');
+  assert.match(body, /result\.txt/);
+  assert.doesNotMatch(body, /other-issue\.txt/);
+  assert.doesNotMatch(readFileSync(join(run, 'diff.patch'), 'utf8'), /other-issue\.txt/);
   rmSync(s.dir, { recursive: true, force: true });
 });
 
