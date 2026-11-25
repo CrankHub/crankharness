@@ -233,6 +233,14 @@ test('readIssue takes the title, the labels and the Touches from the issue file'
   rmSync(s.dir, { recursive: true, force: true });
 });
 
+test('a Touches list is the lease; a "Not `x`" line beside it is not (ROB-407, dispatch 3)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crankharness-touches-'));
+  const file = join(dir, 'CMD-86.md');
+  writeFileSync(file, '# CMD-86: t\n\n## Touches\n\n- `tools/qa`\n- `tests/qa/fixtures/suites/` (new fixtures)\n\nNot `tests/qa/approved-exceptions.json`.\n\n## Caps\n\n8 cycles.\n');
+  assert.deepEqual(readIssue('CMD-86', file).touches, ['tools/qa', 'tests/qa/fixtures/suites/']);
+  rmSync(dir, { recursive: true, force: true });
+});
+
 test('the same failure is the same whatever the timings say (CMD-21, dispatch 1)', () => {
   const run = (a, b, c) => [
     '4. Secrets and personal addresses in text',

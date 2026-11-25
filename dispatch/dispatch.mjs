@@ -154,7 +154,12 @@ export function readIssue(key, file) {
   const touchesText = section(text, 'Touches');
   let touches = [];
   if (touchesText) {
-    const ticked = [...touchesText.matchAll(/`([^`]+)`/g)].map((m) => m[1].trim());
+    // A list wins: its items are the lease, and prose beside it ("Not `x`.") is not. Without a list,
+    // every `path` on the lines counts. This is how the evaluator reads it too (ROB-407, dispatch 3:
+    // CMD-86's "Not `tests/qa/approved-exceptions.json`" was leased to the worker).
+    const items = touchesText.split(/\r?\n/).filter((l) => /^\s*[-*+]\s+/.test(l));
+    const source = items.length ? items.join('\n') : touchesText;
+    const ticked = [...source.matchAll(/`([^`]+)`/g)].map((m) => m[1].trim());
     touches = ticked.length
       ? ticked
       : touchesText.split(/[\n,]/).map((s) => s.replace(/^[\s*-]+/, '').trim()).filter(Boolean);
