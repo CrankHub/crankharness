@@ -20,11 +20,25 @@ import { fileURLToPath } from 'node:url';
 import { parseFrontMatter } from '../check-contract.mjs';
 import { HOOKS_DIR, RULES_PATH, PHASES, normPath, readJson } from './lib.mjs';
 
-const USAGE = 'usage: node hooks/install.mjs --worktree <path> --phase implement|evaluate|merge [--touches <glob,...>]';
+const USAGE = 'usage: node hooks/install.mjs --worktree <path> --phase implement|evaluate|merge [--touches <glob,...>] [--caps cycles=<n>,turns=<n>,wall_minutes=<n>]';
 const MARK = /hooks[\\/](pretooluse|stop)\.mjs/;
 
 export class UsageError extends Error {}
 export class InstallError extends Error {}
+
+// An issue's own caps, over WORKFLOW.md's defaults: "cycles=8,turns=80,wall_minutes=150"
+// (ROB-407, dispatch 3: CMD-86's caps say 150 minutes, the project default is 90).
+export const CAP_KEYS = ['cycles', 'same_failure', 'turns', 'wall_minutes'];
+
+export function parseCaps(text) {
+  const out = {};
+  for (const part of String(text).split(',').map((s) => s.trim()).filter(Boolean)) {
+    const m = /^([a-z_]+)=(\d+)$/.exec(part);
+    if (!m || !CAP_KEYS.includes(m[1])) throw new UsageError(`--caps: "${part}" is not one of ${CAP_KEYS.map((k) => `${k}=<n>`).join(', ')}`);
+    out[m[1]] = Number(m[2]);
+  }
+  return out;
+}
 
 export function parseArgs(argv) {
   const out = { touches: null };
@@ -42,6 +56,7 @@ export function parseArgs(argv) {
     if (flag === '--worktree') out.worktree = value();
     else if (flag === '--phase') out.phase = value();
     else if (flag === '--touches') out.touches = value();
+    else if (flag === '--caps') out.caps = parseCaps(value());
     else if (flag === '--help' || flag === '-h') throw new UsageError('');
     else throw new UsageError(`unknown argument: ${a}`);
   }
@@ -78,7 +93,7 @@ function touchesFromWorkflow(value) {
   return { touches: null, source: `unresolved: ${v}` };
 }
 
-export function install({ worktree, phase, touches = null }) {
+export function install({ worktree, phase, touches = null, caps = {} }) {
   if (!existsSync(worktree) || !statSync(worktree).isDirectory()) throw new UsageError(`--worktree is not a folder: ${worktree}`);
   let top;
   let gitDir;
@@ -131,6 +146,7 @@ export function install({ worktree, phase, touches = null }) {
       same_failure: wf.caps?.same_failure ?? 3,
       turns: wf.caps?.turns ?? 80,
       wall_minutes: wf.caps?.wall_minutes ?? 90,
+      ...caps,
     },
     gate: { local: asList(wf.gate?.local)[0] ?? null, stop: asList(wf.gate?.stop) },
     started_at: new Date().toISOString(),
@@ -188,6 +204,7 @@ function main(argv) {
       worktree: resolve(opts.worktree),
       phase: opts.phase,
       touches: opts.touches,
+      caps: opts.caps,
     });
     const lines = [
       `hooks installed: phase ${config.phase} in ${config.worktree}`,

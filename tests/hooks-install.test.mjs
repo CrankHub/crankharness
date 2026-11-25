@@ -63,6 +63,17 @@ describe('installed: exit 0', () => {
     assert.equal(c.caps.wall_minutes, 90);
   });
 
+  test('--caps puts the issue\'s own caps over WORKFLOW.md\'s (ROB-407, dispatch 3)', () => {
+    const root = repo();
+    const r = run(['--worktree', root, '--phase', 'implement', '--touches', 'src/**', '--caps', 'wall_minutes=150,turns=80']);
+    assert.equal(r.status, 0, r.stderr);
+    const c = configOf(root);
+    assert.equal(c.caps.wall_minutes, 150);
+    assert.equal(c.caps.turns, 80);
+    assert.equal(c.caps.cycles, 8); // untouched keys keep WORKFLOW.md's value
+    assert.equal(run(['--worktree', root, '--phase', 'implement', '--caps', 'hours=2']).status, 2);
+  });
+
   test('the hook config lives in the git folder, not in the files a worker edits', () => {
     const root = repo();
     run(['--worktree', root, '--phase', 'evaluate']);

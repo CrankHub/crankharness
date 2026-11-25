@@ -12,7 +12,7 @@ import { join, resolve, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { slugify, branchName, touchesGlobs, readIssue, parseCommand, parseArgs, workerCommand, failureSignature, parseFlow, chooseEvaluator, readWorkerOutput } from '../dispatch/dispatch.mjs';
+import { slugify, branchName, touchesGlobs, readIssue, parseCommand, parseArgs, workerCommand, failureSignature, parseFlow, chooseEvaluator, readWorkerOutput, issueCaps } from '../dispatch/dispatch.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -357,7 +357,33 @@ test('an issue without agent-ready is refused', () => {
   const r = dispatch(s);
   assert.equal(r.code, 1, r.out);
   assert.match(r.out, /is not labeled agent-ready/);
+  assert.match(r.out, /--ready-note/);
   assert.equal(existsSync(join(s.repo, '.harness')), false);
+  rmSync(s.dir, { recursive: true, force: true });
+});
+
+test('an issue set aside for the harness runs with --ready-note, which goes in the record and the PR (ROB-407, dispatch 3)', () => {
+  const s = scratch();
+  writeFileSync(s.issueFile, ISSUE.replace('agent-ready, ', ''));
+  const r = dispatch(s, ['--ready-note', 'set aside for the harness by the orchestrator (TST-65)']);
+  assert.equal(r.code, 0, r.out);
+  assert.equal(r.record.ready_note, 'set aside for the harness by the orchestrator (TST-65)');
+  assert.match(readFileSync(join(s.repo, '.harness', 'runs', KEY, 'pr-body.md'), 'utf8'), /Ready: not labeled agent-ready; set aside for the harness/);
+  rmSync(s.dir, { recursive: true, force: true });
+});
+
+test('the issue\'s own caps win over WORKFLOW.md\'s and reach the hooks (ROB-407, dispatch 3)', () => {
+  assert.deepEqual(issueCaps('8 cycles, 80 turns, 150 minutes (one cycle is over 20 minutes).'), { cycles: 8, turns: 80, wall_minutes: 150 });
+  assert.deepEqual(issueCaps('* One round. Max cycles: 8   Max turns: 80   Max wall time: 90 min.'), { cycles: 8, turns: 80, wall_minutes: 90 });
+  assert.deepEqual(issueCaps('size:M.'), {});
+  const s = scratch({ hooks: true });
+  writeFileSync(s.issueFile, `${ISSUE}\n## Caps\n\n8 cycles, 80 turns, 15 minutes.\n`);
+  const r = dispatch(s);
+  assert.equal(r.code, 0, r.out);
+  assert.equal(r.record.workflow.caps.wall_minutes, 15); // WORKFLOW.md says 10
+  assert.deepEqual(r.record.workflow.caps_from_issue, { cycles: 8, turns: 80, wall_minutes: 15 });
+  const [hooks] = lines(s.logs.hooks);
+  assert.equal(hooks[hooks.indexOf('--caps') + 1], 'cycles=8,turns=80,wall_minutes=15');
   rmSync(s.dir, { recursive: true, force: true });
 });
 

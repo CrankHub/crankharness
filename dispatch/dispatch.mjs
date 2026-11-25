@@ -59,6 +59,7 @@ export function parseArgs(argv) {
     '--provider': 'provider',
     '--evaluator': 'evaluator',
     '--model': 'model',
+    '--ready-note': 'readyNote',
     '--worker-cmd': 'workerCmd',
     '--gh-cmd': 'ghCmd',
   };
@@ -158,7 +159,22 @@ export function readIssue(key, file) {
       ? ticked
       : touchesText.split(/[\n,]/).map((s) => s.replace(/^[\s*-]+/, '').trim()).filter(Boolean);
   }
-  return { key, title, labels, touches, body: text, source: resolve(file) };
+  return { key, title, labels, touches, caps: issueCaps(section(text, 'Caps')), body: text, source: resolve(file) };
+}
+
+// The issue's own caps (ROB-407: "Per dispatch: the issue's own caps"), read from its Caps section:
+// "8 cycles, 80 turns, 150 minutes", "Max wall time: 90 min", "3 on the same failure".
+export function issueCaps(text) {
+  if (!text) return {};
+  const s = String(text).toLowerCase();
+  const num = (re) => { const m = re.exec(s); return m ? Number(m[1]) : undefined; };
+  const caps = {
+    cycles: num(/(\d+)\s*cycles?\b/) ?? num(/max cycles:\s*(\d+)/),
+    turns: num(/(\d+)\s*turns?\b/) ?? num(/max turns:\s*(\d+)/),
+    wall_minutes: num(/(\d+)\s*min(?:ute)?s?\b/) ?? num(/wall time:\s*(\d+)/),
+    same_failure: num(/(\d+)\s*(?:times\s*)?(?:on\s*)?the same failure/),
+  };
+  return Object.fromEntries(Object.entries(caps).filter(([, v]) => Number.isInteger(v) && v > 0));
 }
 
 export function touchesGlobs(touches, fallback) {
@@ -434,9 +450,17 @@ export function makePlan(opts) {
     if (opts.dryRun) notes.push('no --issue-file: a real dispatch needs one (the issue body is the spec; this script never reads the tracker)');
     else refusals.push('no --issue-file: the issue body is the spec, and this script never reads the tracker');
   }
+  // Ready by label, or set aside for the harness and kept out of that label on purpose, so the
+  // project's own workers do not take it (ROB-407, dispatch 3: CMD-86). A set-aside issue needs
+  // --ready-note naming who set it aside; the note goes in the record and the PR.
+  plan.readyNote = opts.readyNote ?? null;
   if (plan.issue.labels) {
     if (!plan.issue.labels.includes(plan.workflow.ready_label)) {
-      refusals.push(`${key} is not labeled ${plan.workflow.ready_label} (labels: ${plan.issue.labels.join(', ') || 'none'})`);
+      if (plan.readyNote) {
+        notes.push(`not labeled ${plan.workflow.ready_label}; ready by: ${plan.readyNote}`);
+      } else {
+        refusals.push(`${key} is not labeled ${plan.workflow.ready_label} (labels: ${plan.issue.labels.join(', ') || 'none'}); if it was set aside for the harness instead, say by whom with --ready-note`);
+      }
     }
   } else {
     notes.push(`labels not checked: the issue file has no "Labels:" line (the caller checks ${plan.workflow.ready_label})`);
@@ -450,6 +474,9 @@ export function makePlan(opts) {
   plan.worktree = join(repo, '.harness', 'worktrees', key);
   plan.runDir = join(repo, '.harness', 'runs', key);
   plan.touches = touchesGlobs(plan.issue.touches, plan.workflow.touches_default);
+  // The issue's own caps win over WORKFLOW.md's defaults.
+  plan.capsFromIssue = plan.issue.caps || {};
+  plan.workflow.caps = { ...plan.workflow.caps, ...plan.capsFromIssue };
   plan.gate = String(plan.workflow.gate).replace(/<ref>/g, plan.branch);
 
   // The parts.
@@ -467,7 +494,10 @@ export function makePlan(opts) {
 }
 
 function hooksArgv(plan) {
-  return [...plan.hooks.argv, '--worktree', plan.worktree, '--phase', 'implement', '--touches', plan.touches];
+  const argv = [...plan.hooks.argv, '--worktree', plan.worktree, '--phase', 'implement', '--touches', plan.touches];
+  const caps = Object.entries(plan.capsFromIssue || {}).map(([k, v]) => `${k}=${v}`).join(',');
+  if (caps) argv.push('--caps', caps);
+  return argv;
 }
 
 // The evaluator reads its evidence from <repo>/.harness/runs/<KEY>/ of the repo it is given, which
@@ -515,7 +545,7 @@ export function renderPlan(plan) {
   }
   if (plan.workflow) {
     const k = plan.workflow.caps;
-    out.push(`  workflow   WORKFLOW.md sha256 ${plan.workflow.sha256.slice(0, 12)}; caps: ${k.cycles} cycles, stop after ${k.same_failure} on the same failure, ${k.turns} turns, ${k.wall_minutes} min`);
+    out.push(`  workflow   WORKFLOW.md sha256 ${plan.workflow.sha256.slice(0, 12)}; caps: ${k.cycles} cycles, stop after ${k.same_failure} on the same failure, ${k.turns} turns, ${k.wall_minutes} min${Object.keys(plan.capsFromIssue || {}).length ? ` (from the issue: ${Object.keys(plan.capsFromIssue).join(', ')})` : ''}`);
   }
   if (plan.issue) {
     out.push(`  issue      ${prTitle(plan)}${plan.issue.source ? ` (from ${plan.issue.source})` : ''}`);
@@ -691,6 +721,7 @@ function prBody(plan, record) {
       ? `- Evaluator: \`evaluator/evaluate.mjs --issue ${plan.key} --branch ${plan.branch}\` returned ${verdict ?? 'no verdict'} (exit ${last.evaluation?.exit}), judged by ${plan.judge.provider}.`
       : '- Evaluator: not yet provable (evaluator pending, ROB-406).',
     `- Contract: \`check-contract.mjs\` ${plan.contract.pass ? 'PASS' : 'FAIL'} before the run.`,
+    ...(plan.readyNote ? [`- Ready: not labeled ${plan.workflow.ready_label}; ${plan.readyNote}.`] : []),
     '',
     '## Assumed, not proven',
     '',
@@ -746,7 +777,8 @@ export function dispatch(opts, { log = console.log } = {}) {
     started_at: new Date(started).toISOString(),
     finished_at: null,
     wall_seconds: null,
-    workflow: { sha256: plan.workflow.sha256, caps: k, gate: plan.gate, touches: plan.touches },
+    workflow: { sha256: plan.workflow.sha256, caps: k, caps_from_issue: plan.capsFromIssue, gate: plan.gate, touches: plan.touches },
+    ready_note: plan.readyNote,
     contract: { pass: plan.contract.pass, pending: plan.contract.pending, lines: plan.contract.lines.map((l) => l.trim()) },
     hooks: plan.hooks.present ? 'not run' : 'hooks pending',
     evaluator: plan.evaluator.present ? 'not run' : 'evaluator pending',
