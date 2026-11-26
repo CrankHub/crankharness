@@ -14,9 +14,10 @@ setting, a refused hook worked around, a step done by hand. Rob's own interventi
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | 1 | CMD-21 (project-cmd): harvest the engine from CrankMagic by script | claude-opus-5-5 (tier A asks claude-fable-5-2) | 7 in two attempts: 5 (stopped), then 2 | Gate FAIL (attempt 1). First evaluator verdict NEEDS_WORK, then PASS. | 1. Dispatch never gave the evaluator the issue or the test results. 2. The tier A model needs a newer Claude Code; ran Opus 5.5. 3. The same gate failure looked new each cycle (test timings), in dispatch and in the Stop hook. 4. Dispatch does not push on a stop; pushed and opened the PR by hand. 5. **Rob** widened CMD-21's Touches to the project's gate, so the worker could fix its secret scan. 6. A resumed run would have failed on the PR already open. 7. The evaluator's Touches check refused folders written as `engine/` and the worker's `for-rob/` file. 8. The PR body was 815 KB, over GitHub's limit; set by hand. | 1. A test. 2. Nothing yet (follow-up A). 3. Two tests. 4. Nothing yet (follow-up B). 5. A CI check: the worker's fix to the project's secret scan, which now also catches a key shape it missed. 6. A test. 7. Two tests. 8. A test. | [project-cmd#15](https://github.com/CrankHub/project-cmd/pull/15) (merged Nov 20) |
 | 2 | CMD-62 (project-cmd): three candidate looks for the world, one chosen | Codex, gpt-6.1-sol (its config default; the project's GPT tiers are unset). Judged by Claude. | 1 | NEEDS_WORK (Rob, Nov 21: the recheck counts). The run's own PASS came from an evaluator whose Touches check was not running. | 1. `--provider gpt` was refused: the project says gpt, the harness said codex. 2. The evaluator would have judged Codex's work with Codex; the project asks for Claude. 3. The dispatch could not read Codex's output (no summary, turns or usage). 4. Main moved during the run (CMD-33 merged), and the PR body showed CMD-33's files as deleted here. Body corrected by hand. 5. The evaluator's Touches check had silently never run, in this dispatch or in dispatch 1: it read Touches only as a list, and both issues write it on one line. Fixed, and the evaluator run again by hand. | 1. A test. 2. A test (closes follow-up F). 3. A test. 4. A test. 5. A test. | [project-cmd#31](https://github.com/CrankHub/project-cmd/pull/31) (draft; Rob merges) |
+| 3 | CMD-86 (project-cmd): `tools/qa`: close the three remaining ways a commit can hide a skipped test | claude-opus-5-5 (tier A asks claude-fable-5-2; Claude Code 2.1.282 cannot run it). Judged by Codex. | 3 in two attempts: 1 (stopped before the verdict), then 2 more on resume | NEEDS_WORK (cycle 1's work, judged on resume), then NEEDS_WORK, then PASS. | 1. The dispatch and the hooks read only `WORKFLOW.md`'s 90 minutes; the issue asks for 150. 2. A set-aside issue (no `agent-ready`, on purpose) was refused. 3. The dry run leased `tests/qa/approved-exceptions.json`, the one file the issue forbids, from a "Not `x`" line beside the Touches list. 4. The tier A model needs a newer Claude Code; ran Opus 5.5. 5. After the worker's 134-minute cycle and a passing gate, the evaluator read no acceptance criteria (CMD-86 numbers them) and the run stopped unjudged. Fixed, then resumed so the worker did not run again. | 1. Two tests. 2. A test (`--ready-note`). 3. A test. 4. Nothing yet (follow-up A). 5. Three tests (numbered lists; the dry run refuses criteria the evaluator cannot read; `--resume`). | [project-cmd#41](https://github.com/CrankHub/project-cmd/pull/41) (draft; Rob merges) |
 
-First-pass PASS rate so far: 0 of 2. Interventions: 13, one by Rob. Turned into a rule: 11 of 13 (tests in this
-repository, plus one CI check in the project). Two are follow-ups (A, B).
+First-pass PASS rate so far: 0 of 3. Interventions: 18, one by Rob. Turned into a rule: 15 of 18 (tests in this
+repository, plus one CI check in the project). Three are follow-ups (A twice, B).
 
 ## Dispatch 1: CMD-21, Nov 18 and 19, 2026
 
@@ -81,6 +82,39 @@ repository, plus one CI check in the project). Two are follow-ups (A, B).
   - The hooks are Claude Code settings. They did not fence the Codex worker; its sandbox did (follow-up H).
   - Main moves while a worker runs. Every comparison must be against where the branch left main.
 
+## Dispatch 3: CMD-86, Nov 25, 2026
+
+- **Why this issue:** project-cmd's orchestrator (CMD-65) set CMD-86 aside for the harness on Nov 24. It kept it
+  out of `agent-ready` on purpose, so the project's own workers would not take it. Rob gave the go on Nov 25.
+- **Before the run:** three harness gaps, each found by the dry run or by reading the issue, each fixed with a
+  test that fails on the old code: the issue's own caps, a set-aside issue's readiness, and the lease (interventions
+  1 to 3).
+- **Command:** `node dispatch/dispatch.mjs --repo <project-cmd> --issue CMD-86 --issue-file <issue file> --provider claude --model claude-opus-5-5 --ready-note "<who set it aside>"`,
+  after a `--dry-run`. Then the same with `--resume`.
+- **Attempt 1 (145 minutes, 1 cycle, stopped):** the worker worked for 134 minutes and made three commits, all
+  inside the Touches. The gate passed. Then the evaluator stopped the run: it read no acceptance criteria, because
+  CMD-86 numbers them and it read only `-` lists. The dry run had not checked this.
+- **Attempt 2 (138 minutes, resumed):** `--resume` judged the work the branch already held, without running the
+  worker again.
+  - Cycle 1 (the first attempt's work): NEEDS_WORK. No real `node tools/qa run HEAD`, the criterion-2 break not
+    shown, and the `unused` notes incomplete.
+  - Cycle 2 (55 minutes): the worker fixed all three. NEEDS_WORK again: the real run was still not where the
+    evaluator could see it.
+  - Cycle 3 (42 minutes): the worker merged main, ran the real QA run (GREEN, 378 of 378) and committed its whole
+    output as `tests/qa/fixtures/suites/real-run.txt`, home folder hidden. PASS, push, draft PR.
+- **What the run showed about the harness:**
+  - The evaluator was right both times. The worker had ended its first cycle on "Waiting for the real run.", with
+    that run still going. The Stop hook let it stop, because the gate passed (follow-up I).
+  - The evaluator sees the gate output and the diff, nothing else. The worker's only way to show a run the gate
+    does not do was to commit it into the project (follow-up J).
+  - The worker's own report counted 3 or 4 turns for cycles of 42 to 134 minutes. The turn cap cannot see that
+    work; only the wall-time cap can (follow-up K).
+  - The worker wrote neither `for-rob/CMD-86.md` nor `handback/CMD-86.md`, though project-cmd's `AGENTS.md`
+    asks for both. The dispatch prompt does not name them (follow-up L).
+  - A cycle of this issue is 20 to 60 minutes, and the gate alone is 10 to 13. A 150-minute cap left room for
+    three cycles at most.
+  - Check each seam on the real issue text before a long run. The dry run now does this for the criteria.
+
 ## Follow-ups the dispatches found
 
 - **A. The model tier.** Dispatch does not read `providers.<name>.tiers` from `WORKFLOW.md`, and it does not check
@@ -104,12 +138,22 @@ repository, plus one CI check in the project). Two are follow-ups (A, B).
   verification a picture or document issue needs.
 - **H. A fence for Codex.** The hooks are Claude Code settings. Codex has hooks of its own; until they are wired,
   a Codex worker is held by its sandbox, the gate and the evaluator's Touches check only.
+- **I. Stopping with work still running.** A worker that started a long check in the background can stop before
+  it ends, and the Stop hook allows it when the gate passes. Proposed: the prompt says to wait for every check it
+  starts, and the Stop hook refuses a stop while the worker's background tasks run, if Claude Code exposes them.
+- **J. A place for evidence.** The evaluator reads only the gate output and the diff. Proposed: a file in the
+  worktree's run folder (outside the commit) where the worker puts the output of checks the gate does not run;
+  the evaluator reads it as evidence.
+- **K. The turn count.** `claude -p` reports the turns of its last stretch only. Count turns from the hooks' log,
+  or drop the turn cap for Claude workers and rely on wall time.
+- **L. The project's hand-back files.** The prompt should name the files the project's `AGENTS.md` asks of a
+  finishing worker (`for-rob/<KEY>.md`, `handback/<KEY>.md`), and the dispatch should note when they are missing.
+  This joins follow-up D.
 
-## Next dispatches (3 to 10)
+## Next dispatches (4 to 10)
 
-Not started: Rob chooses. project-cmd's own sessions take its Claude issues as they open, so the next ones need
-the project's orchestrator (CMD-65) to set an issue aside for the harness.
+Not started: Rob chooses. CMD-9, the orchestrator's second set-aside issue, waits for Rob's go.
 
 ## Risk list proposal
 
-None from dispatch 1.
+None from dispatches 1 to 3.
