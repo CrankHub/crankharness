@@ -12,7 +12,7 @@ import { join, resolve, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { slugify, branchName, touchesGlobs, readIssue, parseCommand, parseArgs, workerCommand, failureSignature, parseFlow, chooseEvaluator, readWorkerOutput, issueCaps, acceptanceCriteria, handbackFiles } from '../dispatch/dispatch.mjs';
+import { slugify, branchName, touchesGlobs, readIssue, parseCommand, parseArgs, workerCommand, failureSignature, parseFlow, chooseEvaluator, readWorkerOutput, issueCaps, acceptanceCriteria, handbackFiles, buildPrompt } from '../dispatch/dispatch.mjs';
 import { parseIssue } from '../evaluator/evaluate.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -56,10 +56,12 @@ if (mode !== 'nothing') {
     mkdirSync('docs/harvest', { recursive: true });
     for (let i = 0; i < 3000; i += 1) writeFileSync('docs/harvest/a-card-with-a-rather-long-file-name-' + i + '.json', '{}\\n');
   }
-  // The project's hand-back files: written in cycle 1, from cycle 2, or never.
+  // The project's hand-back files: written in cycle 1, from cycle 2, or never; or STOPPED in cycle 1 (Codex's
+  // sandbox, ROB-407 dispatch 4), then rewritten.
   const handback = process.env.FAKE_HANDBACK;
-  if (handback === 'always' || (handback === 'late' && cycle > 1)) {
-    for (const d of ['for-rob', 'handback']) { mkdirSync(d, { recursive: true }); writeFileSync(d + '/${KEY}.md', '# ${KEY}\\n'); }
+  if (handback === 'always' || handback === 'stopped-first' || (handback === 'late' && cycle > 1)) {
+    const stopped = handback === 'stopped-first' && cycle === 1;
+    for (const d of ['for-rob', 'handback']) { mkdirSync(d, { recursive: true }); writeFileSync(d + '/${KEY}.md', (stopped && d === 'handback' ? 'STOPPED: git add was denied\\n\\n' : '') + '# ${KEY}\\n'); }
   }
   if (mode !== 'leave') {
     execFileSync('git', ['add', '-A']);
@@ -684,4 +686,43 @@ test('a worker that never writes them stops on the same failure: no push, no PR'
   assert.notEqual(r.record.pushed, true);
   assert.equal(ghCalls(s.logs.gh, 'create').length, 0);
   rmSync(s.dir, { recursive: true, force: true });
+});
+
+test('a hand-back file that says STOPPED while the gate passes goes back to the worker (ROB-407, dispatch 4)', () => {
+  const s = scratch({ handback: true, evaluator: true });
+  const r = dispatch(s, [], { FAKE_HANDBACK: 'stopped-first', FAKE_EVAL: 'pass' });
+  assert.equal(r.code, 0, r.out);
+  assert.equal(r.record.cycles.length, 2);
+  assert.deepEqual(r.record.cycles[0].handback, { stopped: [`handback/${KEY}.md`] });
+  const prompt2 = readFileSync(join(s.repo, '.harness', 'runs', KEY, 'prompt-2.md'), 'utf8');
+  assert.ok(prompt2.includes(`handback/${KEY}.md says STOPPED, but the gate passed in the harness`), prompt2);
+  assert.equal(r.record.cycles[1].handback, 'present');
+  rmSync(s.dir, { recursive: true, force: true });
+});
+
+test('--feedback gives the first worker cycle a person\'s note, and the record keeps it (ROB-407, dispatch 4)', () => {
+  const s = scratch();
+  const note = join(s.dir, 'note.md');
+  writeFileSync(note, 'Rewrite the hand-back files: the gate passed.\nNothing else.\n');
+  const dry = dispatch(s, ['--feedback', note, '--dry-run']);
+  assert.equal(dry.code, 0, dry.out);
+  assert.match(dry.out, /feedback   Rewrite the hand-back files: the gate passed\./);
+  const r = dispatch(s, ['--feedback', note], { FAKE_MODE: 'bad-then-good' });
+  assert.equal(r.code, 0, r.out);
+  assert.deepEqual(r.record.note_given, { cycle: 1, text: 'Rewrite the hand-back files: the gate passed.\nNothing else.' });
+  const runs = join(s.repo, '.harness', 'runs', KEY);
+  assert.ok(readFileSync(join(runs, 'prompt.md'), 'utf8').includes('A note from the person running this dispatch'));
+  assert.ok(!readFileSync(join(runs, 'prompt-2.md'), 'utf8').includes('A note from the person'), 'once only');
+  const missing = dispatch(s, ['--feedback', join(s.dir, 'nope.md'), '--dry-run']);
+  assert.notEqual(missing.code, 0);
+  assert.match(missing.out, /--feedback .*no such file/);
+  rmSync(s.dir, { recursive: true, force: true });
+});
+
+test('a Codex worker is told the harness commits and gates its work, and that neither limit is a stop (ROB-407, dispatch 4)', () => {
+  const plan = (provider, via) => ({ key: KEY, provider, worker: { via }, branch: BRANCH, touches: 'x', gate: 'tools/gate', workflow: { caps: { cycles: 8 } }, issue: { title: 't', body: 'b' } });
+  const codex = buildPrompt(plan('codex', 'codex exec'), { cycle: 1 });
+  assert.match(codex, /the harness commits it/);
+  assert.match(codex, /do not write STOPPED for them/);
+  assert.doesNotMatch(buildPrompt(plan('claude', 'claude -p'), { cycle: 1 }), /the harness commits it/);
 });

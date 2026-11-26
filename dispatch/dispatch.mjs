@@ -60,6 +60,7 @@ export function parseArgs(argv) {
     '--evaluator': 'evaluator',
     '--model': 'model',
     '--ready-note': 'readyNote',
+    '--feedback': 'feedbackFile',
     '--worker-cmd': 'workerCmd',
     '--gh-cmd': 'ghCmd',
   };
@@ -512,6 +513,14 @@ export function makePlan(opts) {
       refusals.push('the issue file has no acceptance criteria the evaluator can read: a list ("- x" or "1. x") under "## Acceptance criteria"');
     }
   }
+  // --feedback: a person's note on the branch's work, given to the first cycle the worker runs. It is an
+  // intervention, and the record keeps it (ROB-407, dispatch 4).
+  if (opts.feedbackFile) {
+    if (!existsSync(opts.feedbackFile)) refusals.push(`--feedback ${opts.feedbackFile}: no such file`);
+    else plan.note = readFileSync(opts.feedbackFile, 'utf8').trim();
+    if (plan.note === '') refusals.push(`--feedback ${opts.feedbackFile}: the file is empty`);
+    if (plan.note) notes.push(`--feedback: the first worker cycle gets the note in ${opts.feedbackFile}; the record keeps it as an intervention`);
+  }
   plan.resume = Boolean(opts.resume);
   if (plan.resume) notes.push('--resume: cycle 1 judges the work the branch already holds; the worker does not run again until a cycle fails');
   if (opts.provider === 'codex' && !opts.workerCmd) {
@@ -580,6 +589,7 @@ export function renderPlan(plan) {
     out.push(`  issue      ${prTitle(plan)}${plan.issue.source ? ` (from ${plan.issue.source})` : ''}`);
     if (plan.issue.labels) out.push(`  labels     ${plan.issue.labels.join(', ')}`);
     out.push(`  touches    ${plan.touches}`);
+    if (plan.note) out.push(`  feedback   ${plan.note.split(/\r?\n/)[0].slice(0, 100)}${plan.note.length > 100 ? ' ...' : ''}`);
     if (plan.handback?.length) out.push(`  hand-back  ${plan.handback.join(', ')} (the worker's own, outside Touches; a cycle without them goes back to the worker)`);
   }
   if (plan.branch) {
@@ -607,7 +617,7 @@ export function renderPlan(plan) {
 
 // --- the prompt --------------------------------------------------------------------------------
 
-export function buildPrompt(plan, { cycle, feedback }) {
+export function buildPrompt(plan, { cycle, feedback, note }) {
   const k = plan.workflow.caps;
   const lines = [
     `You are a CrankHarness worker. One issue, one session, this worktree, this branch.`,
@@ -629,6 +639,16 @@ export function buildPrompt(plan, { cycle, feedback }) {
       `- Before you stop, write and commit ${plan.handback.join(' and ')}, each as the README.md in its folder says. They are yours and sit outside Touches. The harness opens the pull request after you stop: where a file asks for its link, write "opened by the harness".`,
     );
   }
+  if (plan.provider === 'codex' && plan.worker?.via === 'codex exec') {
+    // ROB-407, dispatch 4: Codex's sandbox refused git add, and parts of the gate, and the worker handed back
+    // STOPPED with "gate exit 1" though the harness then committed its work and the gate passed outside.
+    lines.push(
+      '- Your sandbox cannot write the git folder, and it stops parts of the gate (git writes, Godot, Windows process checks). Leave your work uncommitted when git refuses: after you stop, the harness commits it with a message starting with the issue key, runs the gate outside your sandbox, and that run is the one that counts. Neither limit is a stop: do not write STOPPED for them in any file; say in .harness/PROGRESS.md which gate failures were your sandbox\'s. Where a hand-back file asks for the head commit, write "the harness\'s commit".',
+    );
+  }
+  if (note) {
+    lines.push('', 'A note from the person running this dispatch, on the work so far. Do this first:', '', note);
+  }
   if (feedback) {
     lines.push('', `The last cycle did not pass. Fix this first:`, '', feedback);
   }
@@ -646,9 +666,16 @@ export function handbackFiles(repo, key) {
   return HANDBACK_FOLDERS.filter((d) => existsSync(join(repo, d, 'README.md'))).map((d) => `${d}/${key}.md`);
 }
 
-// The hand-back files missing from the branch's head commit.
+// The hand-back files missing from the branch's head commit, and those that say the work stopped: a
+// file whose first line starts with STOPPED (handback/README.md, "When work is stopped") hands nothing back.
 function missingHandback(plan) {
   return (plan.handback || []).filter((f) => git(['cat-file', '-e', `HEAD:${f}`], plan.worktree).code !== 0);
+}
+function stoppedHandback(plan) {
+  return (plan.handback || []).filter((f) => {
+    const r = git(['show', `HEAD:${f}`], plan.worktree);
+    return r.code === 0 && /^\s*STOPPED\b/.test(r.out);
+  });
 }
 
 function readJson(text) {
@@ -904,7 +931,9 @@ export function dispatch(opts, { log = console.log } = {}) {
         log('  worker     cycle 1: not run (--resume: judging the work the branch holds)');
         save();
       } else {
-        const prompt = buildPrompt(plan, { cycle: n, feedback });
+        const note = plan.note && !record.note_given ? plan.note : null;
+        if (note) record.note_given = { cycle: n, text: note };
+        const prompt = buildPrompt(plan, { cycle: n, feedback, note });
         const promptFile = join(plan.runDir, n === 1 ? 'prompt.md' : `prompt-${n}.md`);
         writeFileSync(promptFile, prompt);
         const w = run(plan.worker.argv, {
@@ -973,15 +1002,17 @@ export function dispatch(opts, { log = console.log } = {}) {
       // The project's hand-back files, checked when the gate passed; with a NEEDS_WORK, both go back at once.
       if (g.code === 0 && plan.handback?.length) {
         const missing = missingHandback(plan);
-        cycle.handback = missing.length ? { missing } : 'present';
-        if (missing.length) {
-          log(`  hand-back  cycle ${n}: missing ${missing.join(', ')}`);
-          const text = `The branch has no ${missing.join(' and no ')}. Write ${missing.length > 1 ? 'them' : 'it'} as the README.md in ${missing.length > 1 ? 'each' : 'its'} folder says, and commit ${missing.length > 1 ? 'them' : 'it'}.`;
+        const stopped = stoppedHandback(plan);
+        cycle.handback = missing.length || stopped.length ? { ...(missing.length ? { missing } : {}), ...(stopped.length ? { stopped } : {}) } : 'present';
+        if (missing.length || stopped.length) {
+          log(`  hand-back  cycle ${n}: ${[missing.length ? `missing ${missing.join(', ')}` : '', stopped.length ? `STOPPED in ${stopped.join(', ')}` : ''].filter(Boolean).join('; ')}`);
+          const parts = [];
+          if (missing.length) parts.push(`The branch has no ${missing.join(' and no ')}. Write ${missing.length > 1 ? 'them' : 'it'} as the README.md in ${missing.length > 1 ? 'each' : 'its'} folder says, and commit ${missing.length > 1 ? 'them' : 'it'}.`);
+          if (stopped.length) parts.push(`${stopped.join(' and ')} ${stopped.length > 1 ? 'say' : 'says'} STOPPED, but the gate passed in the harness (exit 0). Hand the work back as finished: rewrite ${stopped.length > 1 ? 'them' : 'it'} to say what is true now.`);
+          const text = parts.join(' ');
           failure = failure
-            ? { sig: `${failure.sig}+handback`, text: `${failure.text}
-
-Also: ${text}` }
-            : { sig: failureSignature('handback', missing.join(',')), text };
+            ? { sig: `${failure.sig}+handback`, text: `${failure.text}\n\nAlso: ${text}` }
+            : { sig: failureSignature('handback', [...missing, ...stopped.map((f) => `stopped:${f}`)].join(',')), text };
         }
         save();
       }
@@ -1064,7 +1095,7 @@ function main(argv) {
   } catch (err) {
     if (err instanceof UsageError) {
       console.error(`dispatch: ${err.message}`);
-      console.error('usage: node dispatch/dispatch.mjs --repo <checkout> --issue <KEY> [--issue-file <path>] [--provider claude|codex|grok] [--ready-note <who set it aside>] [--resume] [--dry-run]');
+      console.error('usage: node dispatch/dispatch.mjs --repo <checkout> --issue <KEY> [--issue-file <path>] [--provider claude|codex|grok] [--ready-note <who set it aside>] [--feedback <note file>] [--resume] [--dry-run]');
       return 2;
     }
     throw err;
