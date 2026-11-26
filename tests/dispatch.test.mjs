@@ -12,7 +12,8 @@ import { join, resolve, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { slugify, branchName, touchesGlobs, readIssue, parseCommand, parseArgs, workerCommand, failureSignature, parseFlow, chooseEvaluator, readWorkerOutput, issueCaps } from '../dispatch/dispatch.mjs';
+import { slugify, branchName, touchesGlobs, readIssue, parseCommand, parseArgs, workerCommand, failureSignature, parseFlow, chooseEvaluator, readWorkerOutput, issueCaps, acceptanceCriteria } from '../dispatch/dispatch.mjs';
+import { parseIssue } from '../evaluator/evaluate.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -95,6 +96,7 @@ const runs = readFileSync(process.env.FAKE_EVAL_LOG, 'utf8').trim().split('\\n')
 const dir = join(arg('--repo'), '.harness', 'runs', arg('--issue'));
 const issuePath = arg('--issue-file') || join(dir, 'issue.md');
 if (!existsSync(issuePath)) { console.error('no issue text: ' + issuePath + ' does not exist'); process.exit(2); }
+if (process.env.FAKE_EVAL === 'error') { console.error('evaluate: error: the issue has no acceptance criteria'); process.exit(2); }
 const results = join(dir, 'test-results.txt');
 const haveResults = existsSync(results) && /exit 0/.test(readFileSync(results, 'utf8'));
 const pass = haveResults && (process.env.FAKE_EVAL === 'pass' || (process.env.FAKE_EVAL === 'needs-work-once' && runs > 1));
@@ -119,6 +121,10 @@ Labels: Feature, agent-ready, size:S
 ## Goal
 
 A file that says ok.
+
+## Acceptance criteria
+
+- result.txt says ok.
 
 ## Touches
 
@@ -392,6 +398,51 @@ test('the issue\'s own caps win over WORKFLOW.md\'s and reach the hooks (ROB-407
   assert.deepEqual(r.record.workflow.caps_from_issue, { cycles: 8, turns: 80, wall_minutes: 15 });
   const [hooks] = lines(s.logs.hooks);
   assert.equal(hooks[hooks.indexOf('--caps') + 1], 'cycles=8,turns=80,wall_minutes=15');
+  rmSync(s.dir, { recursive: true, force: true });
+});
+
+test('the dispatch reads acceptance criteria as the evaluator does, numbered ones too (ROB-407, dispatch 3: CMD-86)', () => {
+  const md = '# X-1: t\n\n## Acceptance criteria\n\n1. one\n2) two\n- three\n\nProse.\n\n## Touches\n\n1. `a/`\n';
+  assert.deepEqual(acceptanceCriteria(md), parseIssue(md).criteria.map((c) => c.text));
+  assert.deepEqual(acceptanceCriteria(md), ['one', 'two', 'three']);
+  assert.deepEqual(acceptanceCriteria('## Acceptance criteria\n\nThe file says ok.\n'), []);
+});
+
+test('an issue whose criteria the evaluator cannot read is refused in the dry run, before any worker runs (ROB-407, dispatch 3)', () => {
+  const s = scratch({ evaluator: true });
+  writeFileSync(s.issueFile, ISSUE.replace('- result.txt says ok.', 'The file says ok.'));
+  const r = dispatch(s, ['--dry-run']);
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /no acceptance criteria the evaluator can read/);
+  writeFileSync(s.issueFile, ISSUE.replace('- result.txt says ok.', '1. result.txt says ok.'));
+  assert.equal(dispatch(s, ['--dry-run']).code, 0);
+  rmSync(s.dir, { recursive: true, force: true });
+});
+
+test('--resume judges the work a stopped run left on the branch, without running the worker again (ROB-407, dispatch 3)', () => {
+  const s = scratch({ hooks: true, evaluator: true });
+  const first = dispatch(s, [], { FAKE_EVAL: 'error' });
+  assert.equal(first.code, 1, first.out);
+  assert.match(first.record.stop, /the evaluator failed/);
+  // The worker would crash if it ran: --resume must not run it in cycle 1.
+  const r = dispatch(s, ['--resume'], { FAKE_EVAL: 'pass', FAKE_MODE: 'crash' });
+  assert.equal(r.code, 0, r.out);
+  assert.deepEqual(r.record.cycles[0].worker, { resumed: true });
+  assert.equal(r.record.cycles[0].evaluation.verdict, 'PASS');
+  assert.equal(r.record.first_pass_pass, true);
+  assert.equal(r.record.resumed_from, 'attempt-1/dispatch.json');
+  const run = join(s.repo, '.harness', 'runs', KEY);
+  assert.match(JSON.parse(readFileSync(join(run, 'attempt-1', 'dispatch.json'), 'utf8')).stop, /the evaluator failed/);
+  assert.ok(existsSync(join(run, 'attempt-1', 'worker-1.out.json')), "the stopped run's files are kept");
+  assert.equal(r.record.pushed, true);
+  rmSync(s.dir, { recursive: true, force: true });
+});
+
+test('--resume on a branch with no work stops and says so', () => {
+  const s = scratch();
+  const r = dispatch(s, ['--resume']);
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.record.stop, /--resume: .* holds no work/);
   rmSync(s.dir, { recursive: true, force: true });
 });
 

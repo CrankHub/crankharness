@@ -140,9 +140,13 @@ function section(parsed, startsWith) {
   return key ? parsed[key] : null;
 }
 
+// A list item: "- x", "* x", "+ x", "- [ ] x", or numbered, "1. x" or "1) x" (ROB-407, dispatch 3:
+// CMD-86 numbers its criteria, and the evaluator stopped the run after a 134-minute worker cycle).
+export const LIST_ITEM = /^\s*(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?(.*\S)\s*$/;
+
 function listItems(lines) {
   return (lines || [])
-    .map((l) => /^\s*[-*+]\s+(?:\[[ xX]\]\s+)?(.*\S)\s*$/.exec(l))
+    .map((l) => LIST_ITEM.exec(l))
     .filter(Boolean)
     .map((m) => m[1]);
 }

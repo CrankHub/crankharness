@@ -322,6 +322,16 @@ test('parseIssue reads the acceptance criteria and the Touches paths', () => {
   assert.deepEqual(touches, ['src/**', 'tests/greet.test.js']);
 });
 
+test('parseIssue reads numbered acceptance criteria, "1." and "1)" (ROB-407, dispatch 3: CMD-86)', () => {
+  const md = '# X-1: t\n\n## Acceptance criteria\n\n1. one\n2. two, with `code`\n10) ten\n\n## Touches\n\n1. `tools/qa`\n';
+  const { criteria, touches } = parseIssue(md);
+  assert.deepEqual(criteria.map((c) => c.text), ['one', 'two, with `code`', 'ten']);
+  assert.deepEqual(criteria.map((c) => c.id), ['AC1', 'AC2', 'AC3']);
+  assert.deepEqual(touches, ['tools/qa']);
+  // A number inside prose is not an item.
+  assert.equal(parseIssue('## Acceptance criteria\n\nIn 2026. it was so.\n').criteria.length, 0);
+});
+
 test('parseIssue reads Touches written as one line of paths, not only as a list (ROB-407, dispatches 1 and 2)', () => {
   const md = '# X-1: t\n\n## Acceptance criteria\n\n- one\n\n## Touches\n\n`tools/harvest`, `engine/`, `decks/harvested/`\n\n## Out of scope\n\nNothing.\n';
   assert.deepEqual(parseIssue(md).touches, ['tools/harvest', 'engine/', 'decks/harvested/']);
