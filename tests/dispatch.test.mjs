@@ -12,7 +12,7 @@ import { join, resolve, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { slugify, branchName, touchesGlobs, readIssue, parseCommand, parseArgs, workerCommand, failureSignature, parseFlow, chooseEvaluator, readWorkerOutput, issueCaps, acceptanceCriteria } from '../dispatch/dispatch.mjs';
+import { slugify, branchName, touchesGlobs, readIssue, parseCommand, parseArgs, workerCommand, failureSignature, parseFlow, chooseEvaluator, readWorkerOutput, issueCaps, acceptanceCriteria, handbackFiles } from '../dispatch/dispatch.mjs';
 import { parseIssue } from '../evaluator/evaluate.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -55,6 +55,11 @@ if (mode !== 'nothing') {
     // A harvest-sized change: many files with long names (CMD-21 changed 13,089).
     mkdirSync('docs/harvest', { recursive: true });
     for (let i = 0; i < 3000; i += 1) writeFileSync('docs/harvest/a-card-with-a-rather-long-file-name-' + i + '.json', '{}\\n');
+  }
+  // The project's hand-back files: written in cycle 1, from cycle 2, or never.
+  const handback = process.env.FAKE_HANDBACK;
+  if (handback === 'always' || (handback === 'late' && cycle > 1)) {
+    for (const d of ['for-rob', 'handback']) { mkdirSync(d, { recursive: true }); writeFileSync(d + '/${KEY}.md', '# ${KEY}\\n'); }
   }
   if (mode !== 'leave') {
     execFileSync('git', ['add', '-A']);
@@ -131,7 +136,7 @@ A file that says ok.
 \`result.txt\`, \`docs/\`
 `;
 
-function scratch({ hooks = false, evaluator = false, contract = true } = {}) {
+function scratch({ hooks = false, evaluator = false, contract = true, handback = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'crankharness-dispatch-'));
   // The harness, copied.
   const harness = join(dir, 'harness');
@@ -162,6 +167,9 @@ function scratch({ hooks = false, evaluator = false, contract = true } = {}) {
   git(repo, 'config', 'user.email', 'test@example.invalid');
   git(repo, 'config', 'core.autocrlf', 'false');
   writeFileSync(join(repo, 'README.md'), '# project\n');
+  if (handback) {
+    for (const d of ['for-rob', 'handback']) { mkdirSync(join(repo, d)); writeFileSync(join(repo, d, 'README.md'), '# how\n'); }
+  }
   if (contract) {
     writeFileSync(join(repo, 'AGENTS.md'), ['# Rules', '## Mission', '## Scope rules', '## Phase permissions', '## Stop conditions', '## For Rob to confirm', '## Done', ''].join('\n'));
     writeFileSync(join(repo, 'CLAUDE.md'), 'Read AGENTS.md.\n');
@@ -631,5 +639,49 @@ test('first-pass PASS: the gate and the evaluator both pass on cycle 1', () => {
   assert.equal(r.record.first_pass_pass, true);
   assert.equal(r.record.cycles.length, 1);
   assert.match(readFileSync(join(s.repo, '.harness', 'runs', KEY, 'pr-body.md'), 'utf8'), /returned PASS/);
+  rmSync(s.dir, { recursive: true, force: true });
+});
+
+// --- the project's hand-back files (ROB-407, dispatch 4) ----------------------------------------
+
+const HANDBACK = [`for-rob/${KEY}.md`, `handback/${KEY}.md`];
+
+test('a project with for-rob/ and handback/ folders: the dry run names both files; a project without them is asked nothing', () => {
+  const s = scratch({ handback: true });
+  assert.deepEqual(handbackFiles(s.repo, KEY), HANDBACK);
+  const r = dispatch(s, ['--dry-run']);
+  assert.equal(r.code, 0, r.out);
+  assert.ok(r.out.includes(`hand-back  ${HANDBACK.join(', ')}`), r.out);
+  const none = scratch();
+  assert.deepEqual(handbackFiles(none.repo, KEY), []);
+  rmSync(s.dir, { recursive: true, force: true });
+  rmSync(none.dir, { recursive: true, force: true });
+});
+
+test('a cycle without the hand-back files goes back to the worker, and the PR waits for them (ROB-407, dispatch 3)', () => {
+  const s = scratch({ handback: true, evaluator: true });
+  const r = dispatch(s, [], { FAKE_HANDBACK: 'late', FAKE_EVAL: 'pass' });
+  assert.equal(r.code, 0, r.out);
+  const prompt = readFileSync(join(s.repo, '.harness', 'runs', KEY, 'prompt.md'), 'utf8');
+  assert.ok(prompt.includes(`write and commit ${HANDBACK.join(' and ')}`), prompt);
+  assert.deepEqual(r.record.handback_files, HANDBACK);
+  assert.equal(r.record.cycles.length, 2);
+  assert.deepEqual(r.record.cycles[0].handback, { missing: HANDBACK });
+  assert.equal(r.record.cycles[0].evaluation.verdict, 'PASS', 'the evaluator still judged cycle 1');
+  assert.equal(r.record.first_pass_pass, false);
+  assert.equal(r.record.cycles[1].handback, 'present');
+  const prompt2 = readFileSync(join(s.repo, '.harness', 'runs', KEY, 'prompt-2.md'), 'utf8');
+  assert.ok(prompt2.includes(`The branch has no ${HANDBACK[0]} and no ${HANDBACK[1]}`), prompt2);
+  assert.equal(ghCalls(s.logs.gh, 'create').length, 1);
+  rmSync(s.dir, { recursive: true, force: true });
+});
+
+test('a worker that never writes them stops on the same failure: no push, no PR', () => {
+  const s = scratch({ handback: true });
+  const r = dispatch(s, [], { FAKE_HANDBACK: 'never' });
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.record.stop, /same failure 3 times/);
+  assert.notEqual(r.record.pushed, true);
+  assert.equal(ghCalls(s.logs.gh, 'create').length, 0);
   rmSync(s.dir, { recursive: true, force: true });
 });

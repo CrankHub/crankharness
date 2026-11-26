@@ -498,6 +498,7 @@ export function makePlan(opts) {
   plan.capsFromIssue = plan.issue.caps || {};
   plan.workflow.caps = { ...plan.workflow.caps, ...plan.capsFromIssue };
   plan.gate = String(plan.workflow.gate).replace(/<ref>/g, plan.branch);
+  plan.handback = handbackFiles(repo, key);
 
   // The parts.
   plan.hooks = optionalCommand('hooks/install.mjs');
@@ -579,6 +580,7 @@ export function renderPlan(plan) {
     out.push(`  issue      ${prTitle(plan)}${plan.issue.source ? ` (from ${plan.issue.source})` : ''}`);
     if (plan.issue.labels) out.push(`  labels     ${plan.issue.labels.join(', ')}`);
     out.push(`  touches    ${plan.touches}`);
+    if (plan.handback?.length) out.push(`  hand-back  ${plan.handback.join(', ')} (the worker's own, outside Touches; a cycle without them goes back to the worker)`);
   }
   if (plan.branch) {
     out.push(`  branch     ${plan.branch} from ${plan.base.ref}`);
@@ -622,6 +624,11 @@ export function buildPrompt(plan, { cycle, feedback }) {
     `- Commit your work on this branch; start every commit message with ${plan.key}.`,
     '- Stop and say why in .harness/PROGRESS.md if you cannot go on (a stop condition in AGENTS.md).',
   ];
+  if (plan.handback?.length) {
+    lines.push(
+      `- Before you stop, write and commit ${plan.handback.join(' and ')}, each as the README.md in its folder says. They are yours and sit outside Touches. The harness opens the pull request after you stop: where a file asks for its link, write "opened by the harness".`,
+    );
+  }
   if (feedback) {
     lines.push('', `The last cycle did not pass. Fix this first:`, '', feedback);
   }
@@ -630,6 +637,19 @@ export function buildPrompt(plan, { cycle, feedback }) {
 }
 
 // --- the run -----------------------------------------------------------------------------------
+
+// The files a project asks of a finishing worker: <folder>/<KEY>.md for each hand-back folder the project
+// has (one with a README.md that says how). project-cmd has for-rob/ and handback/ (ROB-407, dispatch 3:
+// CMD-86 merged without either, and the prompt had not named them).
+export const HANDBACK_FOLDERS = ['for-rob', 'handback'];
+export function handbackFiles(repo, key) {
+  return HANDBACK_FOLDERS.filter((d) => existsSync(join(repo, d, 'README.md'))).map((d) => `${d}/${key}.md`);
+}
+
+// The hand-back files missing from the branch's head commit.
+function missingHandback(plan) {
+  return (plan.handback || []).filter((f) => git(['cat-file', '-e', `HEAD:${f}`], plan.worktree).code !== 0);
+}
 
 function readJson(text) {
   try {
@@ -819,6 +839,7 @@ export function dispatch(opts, { log = console.log } = {}) {
     finished_at: null,
     wall_seconds: null,
     workflow: { sha256: plan.workflow.sha256, caps: k, caps_from_issue: plan.capsFromIssue, gate: plan.gate, touches: plan.touches },
+    handback_files: plan.handback,
     ready_note: plan.readyNote,
     contract: { pass: plan.contract.pass, pending: plan.contract.pending, lines: plan.contract.lines.map((l) => l.trim()) },
     hooks: plan.hooks.present ? 'not run' : 'hooks pending',
@@ -948,6 +969,21 @@ export function dispatch(opts, { log = console.log } = {}) {
           const detail = evaluationFeedback(evaluation) ?? tail(e.out + e.err);
           failure = { sig: failureSignature('evaluator', detail), text: `The evaluator returned NEEDS_WORK:\n\n${detail}` };
         }
+      }
+      // The project's hand-back files, checked when the gate passed; with a NEEDS_WORK, both go back at once.
+      if (g.code === 0 && plan.handback?.length) {
+        const missing = missingHandback(plan);
+        cycle.handback = missing.length ? { missing } : 'present';
+        if (missing.length) {
+          log(`  hand-back  cycle ${n}: missing ${missing.join(', ')}`);
+          const text = `The branch has no ${missing.join(' and no ')}. Write ${missing.length > 1 ? 'them' : 'it'} as the README.md in ${missing.length > 1 ? 'each' : 'its'} folder says, and commit ${missing.length > 1 ? 'them' : 'it'}.`;
+          failure = failure
+            ? { sig: `${failure.sig}+handback`, text: `${failure.text}
+
+Also: ${text}` }
+            : { sig: failureSignature('handback', missing.join(',')), text };
+        }
+        save();
       }
       if (n === 1) {
         record.first_pass_gate = g.code === 0;

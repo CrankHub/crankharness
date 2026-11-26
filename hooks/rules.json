@@ -125,7 +125,7 @@
     "outside_touches": {
       "id": "outside-touches",
       "why": "the issue's Touches are the lease; ask on the issue for another file instead of editing it",
-      "always_writable": ["PROGRESS.md", "for-rob/**"],
+      "always_writable": ["PROGRESS.md", "for-rob/**", "handback/**"],
       "new_tests": ["**/*.test.*", "**/*.spec.*", "tests/**", "test/**", "**/__tests__/**"]
     },
     "read_only_phase": {

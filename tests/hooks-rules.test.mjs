@@ -229,6 +229,7 @@ describe('outside-touches: the Touches are the lease', () => {
     allowed(write(join(root, 'src', 'app', 'x.js')));
     allowed(edit(join(root, 'PROGRESS.md')));
     allowed(write(join(root, 'for-rob', 'ROB-1.md')));
+    allowed(write(join(root, 'handback', 'ROB-1.md')));
     allowed(write(join(root, 'tests', 'new.test.mjs')));
     allowed(bash('echo hi > src/app/y.js'));
     allowed(bash('cd src/app && echo x > z.js'));

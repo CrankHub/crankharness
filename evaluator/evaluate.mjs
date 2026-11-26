@@ -195,9 +195,10 @@ export function outsideTouches(files, touches) {
 }
 
 // The files a worker may write outside its Touches are the hooks' (hooks/rules.json, scope.outside_touches):
-// always PROGRESS.md and for-rob/**, and new test files. The evaluator reads the same list, so the fence and
+// always PROGRESS.md, for-rob/** and handback/** (the worker's hand-back files, ROB-407 dispatch 4, follow-up D),
+// and new test files. The evaluator reads the same list, so the fence and
 // the judge agree (CMD-21, dispatch 1: the hooks allowed for-rob/CMD-21.md and this check would have refused it).
-const DEFAULT_ALLOWED = { always: ['PROGRESS.md', 'for-rob/**'], newTests: ['**/*.test.*', '**/*.spec.*', 'tests/**', 'test/**', '**/__tests__/**'] };
+const DEFAULT_ALLOWED = { always: ['PROGRESS.md', 'for-rob/**', 'handback/**'], newTests: ['**/*.test.*', '**/*.spec.*', 'tests/**', 'test/**', '**/__tests__/**'] };
 
 export function allowedOutsideTouches(rulesPath = join(HERE, '..', 'hooks', 'rules.json')) {
   try {

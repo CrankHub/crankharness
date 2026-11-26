@@ -41,7 +41,7 @@ The rules are data, not code. Each refusal names its rule, for example
 | `evaluate-read-only` | `git commit`, `git push` and other history changes, PR edits | evaluate |
 | `read-only-phase` | writing any file | evaluate |
 | `outside-worktree` | writing outside the worktree (the temp folder is allowed) | all |
-| `outside-touches` | writing a file outside the issue's Touches; `PROGRESS.md`, `for-rob/**` and new test files are allowed | implement |
+| `outside-touches` | writing a file outside the issue's Touches; `PROGRESS.md`, `for-rob/**`, `handback/**` and new test files are allowed | implement |
 | `cap-wall-time` | everything but reading, `git add/commit/push` and `PROGRESS.md`, once `caps.wall_minutes` is spent | all |
 
 If the hook itself fails, it refuses: a fence that fails open is not a fence.

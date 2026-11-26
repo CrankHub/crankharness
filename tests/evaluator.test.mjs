@@ -364,9 +364,11 @@ test('globs: ** spans folders, * stays in one, a plain path covers what is under
 test('the Touches check allows what the hooks allow: for-rob/**, PROGRESS.md, new test files (CMD-21, dispatch 1)', () => {
   const allowed = allowedOutsideTouches();
   assert.ok(allowed.always.includes('for-rob/**'), 'read from hooks/rules.json');
+  assert.ok(allowed.always.includes('handback/**'), "the hand-back file is the worker's too (ROB-407, dispatch 4, follow-up D)");
   const changed = [
     { status: 'A', path: 'tools/harvest' },
     { status: 'A', path: 'for-rob/CMD-21.md' },
+    { status: 'A', path: 'handback/CMD-21.md' },
     { status: 'M', path: 'PROGRESS.md' },
     { status: 'A', path: 'tests/foundation/whole-game.test.mjs' },
     { status: 'M', path: 'tests/old.test.mjs' }, // an edited test is not new: still outside
