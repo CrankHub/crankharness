@@ -21,7 +21,7 @@
 // split on spaces ("node w.mjs"). The worker gets its prompt on stdin, runs in the worktree, and
 // also finds it in the file named by CRANKHARNESS_PROMPT_FILE.
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, appendFileSync, copyFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, appendFileSync, copyFileSync, statSync, readdirSync, renameSync } from 'node:fs';
 import { resolve, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -51,7 +51,7 @@ class StopError extends Error {}
 // --- arguments --------------------------------------------------------------------------------
 
 export function parseArgs(argv) {
-  const opts = { provider: 'claude', dryRun: false };
+  const opts = { provider: 'claude', dryRun: false, resume: false };
   const valued = {
     '--repo': 'repo',
     '--issue': 'issue',
@@ -59,6 +59,7 @@ export function parseArgs(argv) {
     '--provider': 'provider',
     '--evaluator': 'evaluator',
     '--model': 'model',
+    '--ready-note': 'readyNote',
     '--worker-cmd': 'workerCmd',
     '--gh-cmd': 'ghCmd',
   };
@@ -66,6 +67,8 @@ export function parseArgs(argv) {
     const a = argv[i];
     if (a === '--dry-run') {
       opts.dryRun = true;
+    } else if (a === '--resume') {
+      opts.resume = true;
     } else if (a in valued) {
       if (i + 1 >= argv.length) throw new UsageError(`${a} needs a value`);
       opts[valued[a]] = argv[i + 1];
@@ -138,6 +141,19 @@ function section(markdown, name) {
   return out.join('\n').trim();
 }
 
+// A list item as the evaluator reads one (evaluator/evaluate.mjs LIST_ITEM): "- x", "* x", "+ x",
+// or numbered, "1. x" or "1) x".
+const LIST_ITEM = /^\s*(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?(.*\S)\s*$/;
+
+// The acceptance criteria, read as the evaluator reads them. The dispatch refuses an issue whose
+// criteria the evaluator cannot read, so the dry run says so, not the evaluator after the worker's
+// cycle (ROB-407, dispatch 3: CMD-86 numbers its criteria; the evaluator read none after 134 minutes).
+export function acceptanceCriteria(text) {
+  const body = section(String(text ?? ''), 'Acceptance criteria');
+  if (!body) return [];
+  return body.split(/\r?\n/).map((l) => LIST_ITEM.exec(l)).filter(Boolean).map((m) => m[1]);
+}
+
 // The issue file is the issue as Markdown: a first heading "# KEY: title" (or "# title"), an
 // optional "Labels: a, b" line, then the body with its sections (Goal, Touches, ...).
 export function readIssue(key, file) {
@@ -153,12 +169,32 @@ export function readIssue(key, file) {
   const touchesText = section(text, 'Touches');
   let touches = [];
   if (touchesText) {
-    const ticked = [...touchesText.matchAll(/`([^`]+)`/g)].map((m) => m[1].trim());
+    // A list wins: its items are the lease, and prose beside it ("Not `x`.") is not. Without a list,
+    // every `path` on the lines counts. This is how the evaluator reads it too (ROB-407, dispatch 3:
+    // CMD-86's "Not `tests/qa/approved-exceptions.json`" was leased to the worker).
+    const items = touchesText.split(/\r?\n/).filter((l) => LIST_ITEM.test(l));
+    const source = items.length ? items.join('\n') : touchesText;
+    const ticked = [...source.matchAll(/`([^`]+)`/g)].map((m) => m[1].trim());
     touches = ticked.length
       ? ticked
       : touchesText.split(/[\n,]/).map((s) => s.replace(/^[\s*-]+/, '').trim()).filter(Boolean);
   }
-  return { key, title, labels, touches, body: text, source: resolve(file) };
+  return { key, title, labels, touches, caps: issueCaps(section(text, 'Caps')), body: text, source: resolve(file) };
+}
+
+// The issue's own caps (ROB-407: "Per dispatch: the issue's own caps"), read from its Caps section:
+// "8 cycles, 80 turns, 150 minutes", "Max wall time: 90 min", "3 on the same failure".
+export function issueCaps(text) {
+  if (!text) return {};
+  const s = String(text).toLowerCase();
+  const num = (re) => { const m = re.exec(s); return m ? Number(m[1]) : undefined; };
+  const caps = {
+    cycles: num(/(\d+)\s*cycles?\b/) ?? num(/max cycles:\s*(\d+)/),
+    turns: num(/(\d+)\s*turns?\b/) ?? num(/max turns:\s*(\d+)/),
+    wall_minutes: num(/(\d+)\s*min(?:ute)?s?\b/) ?? num(/wall time:\s*(\d+)/),
+    same_failure: num(/(\d+)\s*(?:times\s*)?(?:on\s*)?the same failure/),
+  };
+  return Object.fromEntries(Object.entries(caps).filter(([, v]) => Number.isInteger(v) && v > 0));
 }
 
 export function touchesGlobs(touches, fallback) {
@@ -434,9 +470,17 @@ export function makePlan(opts) {
     if (opts.dryRun) notes.push('no --issue-file: a real dispatch needs one (the issue body is the spec; this script never reads the tracker)');
     else refusals.push('no --issue-file: the issue body is the spec, and this script never reads the tracker');
   }
+  // Ready by label, or set aside for the harness and kept out of that label on purpose, so the
+  // project's own workers do not take it (ROB-407, dispatch 3: CMD-86). A set-aside issue needs
+  // --ready-note naming who set it aside; the note goes in the record and the PR.
+  plan.readyNote = opts.readyNote ?? null;
   if (plan.issue.labels) {
     if (!plan.issue.labels.includes(plan.workflow.ready_label)) {
-      refusals.push(`${key} is not labeled ${plan.workflow.ready_label} (labels: ${plan.issue.labels.join(', ') || 'none'})`);
+      if (plan.readyNote) {
+        notes.push(`not labeled ${plan.workflow.ready_label}; ready by: ${plan.readyNote}`);
+      } else {
+        refusals.push(`${key} is not labeled ${plan.workflow.ready_label} (labels: ${plan.issue.labels.join(', ') || 'none'}); if it was set aside for the harness instead, say by whom with --ready-note`);
+      }
     }
   } else {
     notes.push(`labels not checked: the issue file has no "Labels:" line (the caller checks ${plan.workflow.ready_label})`);
@@ -450,6 +494,9 @@ export function makePlan(opts) {
   plan.worktree = join(repo, '.harness', 'worktrees', key);
   plan.runDir = join(repo, '.harness', 'runs', key);
   plan.touches = touchesGlobs(plan.issue.touches, plan.workflow.touches_default);
+  // The issue's own caps win over WORKFLOW.md's defaults.
+  plan.capsFromIssue = plan.issue.caps || {};
+  plan.workflow.caps = { ...plan.workflow.caps, ...plan.capsFromIssue };
   plan.gate = String(plan.workflow.gate).replace(/<ref>/g, plan.branch);
 
   // The parts.
@@ -458,6 +505,14 @@ export function makePlan(opts) {
   plan.worker = workerCommand(opts.provider, { override: opts.workerCmd, model: opts.model });
   plan.judge = chooseEvaluator({ providers: plan.workflow.providers, worker: opts.provider, workerAsNamed: plan.providerAsNamed, override: opts.evaluator });
   if (plan.worker.pending) refusals.push(plan.worker.pending);
+  if (plan.issue.body && plan.evaluator.present) {
+    plan.issue.criteria = acceptanceCriteria(plan.issue.body).length;
+    if (plan.issue.criteria === 0) {
+      refusals.push('the issue file has no acceptance criteria the evaluator can read: a list ("- x" or "1. x") under "## Acceptance criteria"');
+    }
+  }
+  plan.resume = Boolean(opts.resume);
+  if (plan.resume) notes.push('--resume: cycle 1 judges the work the branch already holds; the worker does not run again until a cycle fails');
   if (opts.provider === 'codex' && !opts.workerCmd) {
     notes.push('codex worker: the hooks are Claude Code settings and do not fence it; its workspace-write sandbox, the gate and the evaluator\'s Touches check do');
   }
@@ -467,7 +522,10 @@ export function makePlan(opts) {
 }
 
 function hooksArgv(plan) {
-  return [...plan.hooks.argv, '--worktree', plan.worktree, '--phase', 'implement', '--touches', plan.touches];
+  const argv = [...plan.hooks.argv, '--worktree', plan.worktree, '--phase', 'implement', '--touches', plan.touches];
+  const caps = Object.entries(plan.capsFromIssue || {}).map(([k, v]) => `${k}=${v}`).join(',');
+  if (caps) argv.push('--caps', caps);
+  return argv;
 }
 
 // The evaluator reads its evidence from <repo>/.harness/runs/<KEY>/ of the repo it is given, which
@@ -515,7 +573,7 @@ export function renderPlan(plan) {
   }
   if (plan.workflow) {
     const k = plan.workflow.caps;
-    out.push(`  workflow   WORKFLOW.md sha256 ${plan.workflow.sha256.slice(0, 12)}; caps: ${k.cycles} cycles, stop after ${k.same_failure} on the same failure, ${k.turns} turns, ${k.wall_minutes} min`);
+    out.push(`  workflow   WORKFLOW.md sha256 ${plan.workflow.sha256.slice(0, 12)}; caps: ${k.cycles} cycles, stop after ${k.same_failure} on the same failure, ${k.turns} turns, ${k.wall_minutes} min${Object.keys(plan.capsFromIssue || {}).length ? ` (from the issue: ${Object.keys(plan.capsFromIssue).join(', ')})` : ''}`);
   }
   if (plan.issue) {
     out.push(`  issue      ${prTitle(plan)}${plan.issue.source ? ` (from ${plan.issue.source})` : ''}`);
@@ -529,7 +587,7 @@ export function renderPlan(plan) {
     out.push('  exclude    .harness/ goes in .git/info/exclude (never the project .gitignore)');
     out.push('  steps');
     out.push(`    1 hooks      ${plan.hooks.present ? show(hooksArgv(plan)) : 'hooks pending (hooks/install.mjs not here yet: ROB-405)'}`);
-    out.push(`    2 worker     ${plan.worker.argv ? `${show(plan.worker.argv)}  (prompt on stdin, cwd = the worktree)` : plan.worker.pending}`);
+    out.push(`    2 worker     ${plan.worker.argv ? `${show(plan.worker.argv)}  (prompt on stdin, cwd = the worktree)` : plan.worker.pending}${plan.resume ? '; skipped in cycle 1 (--resume)' : ''}`);
     out.push(`    3 gate       bash -c ${JSON.stringify(plan.gate)}  (cwd = the worktree)`);
     out.push(`    4 evaluator  ${plan.evaluator.present ? show(evaluatorArgv(plan)) : 'evaluator pending (evaluator/evaluate.mjs not here yet: ROB-406)'}`);
     out.push(`      judged by ${plan.judge.provider} (${plan.judge.why})`);
@@ -584,6 +642,18 @@ function readJson(text) {
       return null;
     }
   }
+}
+
+// --resume keeps the stopped run's files: they move into attempt-<n>/ beside the new run's.
+function setAsideEarlierRun(runDir) {
+  const files = readdirSync(runDir, { withFileTypes: true }).filter((d) => d.isFile());
+  if (!files.length) return null;
+  let n = 1;
+  while (existsSync(join(runDir, `attempt-${n}`))) n += 1;
+  const to = join(runDir, `attempt-${n}`);
+  mkdirSync(to);
+  for (const f of files) renameSync(join(runDir, f.name), join(to, f.name));
+  return `attempt-${n}/dispatch.json`;
 }
 
 function excludeHarness(worktree) {
@@ -691,6 +761,7 @@ function prBody(plan, record) {
       ? `- Evaluator: \`evaluator/evaluate.mjs --issue ${plan.key} --branch ${plan.branch}\` returned ${verdict ?? 'no verdict'} (exit ${last.evaluation?.exit}), judged by ${plan.judge.provider}.`
       : '- Evaluator: not yet provable (evaluator pending, ROB-406).',
     `- Contract: \`check-contract.mjs\` ${plan.contract.pass ? 'PASS' : 'FAIL'} before the run.`,
+    ...(plan.readyNote ? [`- Ready: not labeled ${plan.workflow.ready_label}; ${plan.readyNote}.`] : []),
     '',
     '## Assumed, not proven',
     '',
@@ -728,6 +799,7 @@ export function dispatch(opts, { log = console.log } = {}) {
   const k = plan.workflow.caps;
   const deadline = started + k.wall_minutes * 60 * 1000;
   mkdirSync(plan.runDir, { recursive: true });
+  const resumedFrom = plan.resume ? setAsideEarlierRun(plan.runDir) : null;
   const record = {
     harness: 'crankharness',
     record: 'dispatch',
@@ -746,7 +818,8 @@ export function dispatch(opts, { log = console.log } = {}) {
     started_at: new Date(started).toISOString(),
     finished_at: null,
     wall_seconds: null,
-    workflow: { sha256: plan.workflow.sha256, caps: k, gate: plan.gate, touches: plan.touches },
+    workflow: { sha256: plan.workflow.sha256, caps: k, caps_from_issue: plan.capsFromIssue, gate: plan.gate, touches: plan.touches },
+    ready_note: plan.readyNote,
     contract: { pass: plan.contract.pass, pending: plan.contract.pending, lines: plan.contract.lines.map((l) => l.trim()) },
     hooks: plan.hooks.present ? 'not run' : 'hooks pending',
     evaluator: plan.evaluator.present ? 'not run' : 'evaluator pending',
@@ -766,6 +839,7 @@ export function dispatch(opts, { log = console.log } = {}) {
     notes: [...plan.notes],
     next: [],
   };
+  if (plan.resume) record.resumed_from = resumedFrom;
   const recordPath = join(plan.runDir, 'dispatch.json');
   const save = () => writeFileSync(recordPath, `${JSON.stringify(record, null, 2)}\n`);
   save();
@@ -802,33 +876,41 @@ export function dispatch(opts, { log = console.log } = {}) {
       if (left <= 0) throw new StopError(`wall time cap: ${k.wall_minutes} min`);
       if (record.turns >= k.turns) throw new StopError(`turn cap: ${k.turns} turns`);
 
-      const prompt = buildPrompt(plan, { cycle: n, feedback });
-      const promptFile = join(plan.runDir, n === 1 ? 'prompt.md' : `prompt-${n}.md`);
-      writeFileSync(promptFile, prompt);
-      const w = run(plan.worker.argv, {
-        cwd: plan.worktree,
-        input: prompt,
-        timeout: left,
-        env: { CRANKHARNESS_PROMPT_FILE: promptFile, CRANKHARNESS_ISSUE: plan.key, CRANKHARNESS_CYCLE: String(n) },
-      });
-      writeFileSync(join(plan.runDir, `worker-${n}.out.json`), w.out);
-      if (w.err.trim()) writeFileSync(join(plan.runDir, `worker-${n}.err.txt`), w.err);
-      const reported = readWorkerOutput(plan.worker.via === 'injected' ? 'claude' : plan.provider, w.out);
-      cycle.worker = { exit: w.code, seconds: w.seconds };
-      if (Number.isInteger(reported.turns)) cycle.worker.turns = reported.turns;
-      if (Number.isInteger(reported.steps)) cycle.worker.steps = reported.steps;
-      if (reported.usage) cycle.worker.usage = reported.usage;
-      if (reported.session_id) cycle.worker.session_id = reported.session_id;
-      if (reported.summary) record.worker_summary = reported.summary.slice(0, 2000);
-      record.turns += cycle.worker.turns ?? 0;
-      const progress = join(plan.worktree, '.harness', 'PROGRESS.md');
-      if (existsSync(progress)) copyFileSync(progress, join(plan.runDir, 'PROGRESS.md'));
-      log(`  worker     cycle ${n}: exit ${w.code} in ${w.seconds}s`);
-      save();
-      if (w.timedOut) throw new StopError(`wall time cap: ${k.wall_minutes} min (the worker was stopped)`);
-      if (w.code !== 0) throw new StopError(`the worker exited ${w.code}: ${tail(w.err || w.out, 5)}`);
-      cycle.committed_by_dispatch = commitLeftovers(plan);
-      if (!hasChanges(plan)) throw new StopError('the worker made no change');
+      if (n === 1 && plan.resume) {
+        // The worker's earlier cycle stands; judge it (ROB-407, dispatch 3).
+        if (!hasChanges(plan)) throw new StopError(`--resume: ${plan.branch} holds no work ahead of ${plan.base.ref} to judge`);
+        cycle.worker = { resumed: true };
+        log('  worker     cycle 1: not run (--resume: judging the work the branch holds)');
+        save();
+      } else {
+        const prompt = buildPrompt(plan, { cycle: n, feedback });
+        const promptFile = join(plan.runDir, n === 1 ? 'prompt.md' : `prompt-${n}.md`);
+        writeFileSync(promptFile, prompt);
+        const w = run(plan.worker.argv, {
+          cwd: plan.worktree,
+          input: prompt,
+          timeout: left,
+          env: { CRANKHARNESS_PROMPT_FILE: promptFile, CRANKHARNESS_ISSUE: plan.key, CRANKHARNESS_CYCLE: String(n) },
+        });
+        writeFileSync(join(plan.runDir, `worker-${n}.out.json`), w.out);
+        if (w.err.trim()) writeFileSync(join(plan.runDir, `worker-${n}.err.txt`), w.err);
+        const reported = readWorkerOutput(plan.worker.via === 'injected' ? 'claude' : plan.provider, w.out);
+        cycle.worker = { exit: w.code, seconds: w.seconds };
+        if (Number.isInteger(reported.turns)) cycle.worker.turns = reported.turns;
+        if (Number.isInteger(reported.steps)) cycle.worker.steps = reported.steps;
+        if (reported.usage) cycle.worker.usage = reported.usage;
+        if (reported.session_id) cycle.worker.session_id = reported.session_id;
+        if (reported.summary) record.worker_summary = reported.summary.slice(0, 2000);
+        record.turns += cycle.worker.turns ?? 0;
+        const progress = join(plan.worktree, '.harness', 'PROGRESS.md');
+        if (existsSync(progress)) copyFileSync(progress, join(plan.runDir, 'PROGRESS.md'));
+        log(`  worker     cycle ${n}: exit ${w.code} in ${w.seconds}s`);
+        save();
+        if (w.timedOut) throw new StopError(`wall time cap: ${k.wall_minutes} min (the worker was stopped)`);
+        if (w.code !== 0) throw new StopError(`the worker exited ${w.code}: ${tail(w.err || w.out, 5)}`);
+        cycle.committed_by_dispatch = commitLeftovers(plan);
+        if (!hasChanges(plan)) throw new StopError('the worker made no change');
+      }
 
       // 6. The local gate.
       const g = run([bashPath(), '-c', plan.gate], { cwd: plan.worktree, timeout: Math.max(deadline - Date.now(), 1000) });
@@ -946,7 +1028,7 @@ function main(argv) {
   } catch (err) {
     if (err instanceof UsageError) {
       console.error(`dispatch: ${err.message}`);
-      console.error('usage: node dispatch/dispatch.mjs --repo <checkout> --issue <KEY> [--issue-file <path>] [--provider claude|codex|grok] [--dry-run]');
+      console.error('usage: node dispatch/dispatch.mjs --repo <checkout> --issue <KEY> [--issue-file <path>] [--provider claude|codex|grok] [--ready-note <who set it aside>] [--resume] [--dry-run]');
       return 2;
     }
     throw err;
